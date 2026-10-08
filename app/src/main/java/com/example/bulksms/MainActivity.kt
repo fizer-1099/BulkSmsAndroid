@@ -120,6 +120,29 @@ class MainActivity : AppCompatActivity() {
         showTab(0)
     }
 
+
+    private fun exportCsv(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            try {
+                val rows = db.sendLogDao().latest(100000)
+                val sb = StringBuilder("\uFEFFphone,message,group,status\n")
+                for (r in rows) {
+                    fun q(v: String) = "\"" + v.replace("\"", "\"\"") + "\""
+                    sb.append(q(r.phone)).append(',')
+                        .append(q(r.message)).append(',')
+                        .append(q(r.groupName)).append(',')
+                        .append(q(r.status)).append('\n')
+                }
+                contentResolver.openOutputStream(uri)?.use {
+                    it.write(sb.toString().toByteArray(Charsets.UTF_8))
+                }
+                android.widget.Toast.makeText(this@MainActivity, "ذخیره شد", android.widget.Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(this@MainActivity, "خطا: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private fun showTab(tab:Int) {
         content.removeAllViews()
         when(tab) {
