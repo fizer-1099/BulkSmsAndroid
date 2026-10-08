@@ -199,90 +199,34 @@ class MainActivity : AppCompatActivity() {
         }
         box.addView(TextView(this).apply{text=c.name.ifBlank{"بدون نام"};textSize=17f;setTextColor(Color.rgb(15,23,42))})
         box.addView(TextView(this).apply{text=c.phone;textSize=14f;setTextColor(Color.rgb(71,85,105))})
-        box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)Color.rgb(185,28,28) else Color.rgb(71,85,105))})
+        box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)Color.rgb(185,28,28)Color.rgb(71,85,105))})
         return box
     }
 
-    private fun contactDialog(existing: ContactEntity?) {
-    val box = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        layoutDirection = rtl
-    }
-
-    val name = EditText(this).apply {
-        hint = "نام و نام خانوادگی"
-        setText(existing?.name ?: "")
-        setBackgroundResource(R.drawable.input_bg)
-    }
-
-    val phone = EditText(this).apply {
-        hint = "شماره موبایل"
-        setText(existing?.phone ?: "")
-        setBackgroundResource(R.drawable.input_bg)
-    }
-
-    val group = EditText(this).apply {
-        hint = "گروه"
-        setText(existing?.groupName ?: "")
-        setBackgroundResource(R.drawable.input_bg)
-    }
-
-    box.addView(name, marginParams())
-    box.addView(phone, marginParams())
-    box.addView(group, marginParams())
-
-    val dialog = AlertDialog.Builder(this)
-        .setTitle(if (existing == null) "افزودن مخاطب" else "ویرایش مخاطب")
-        .setView(box)
-        .setPositiveButton("ذخیره") { _, _ ->
-            val p = phone.text.toString().trim()
-            if (p.isBlank()) {
-                toast("شماره موبایل را وارد کنید.")
-                return@setPositiveButton
-            }
-
-            lifecycleScope.launch {
-                db.contactDao().upsert(
-                    ContactEntity(
-                        existing?.id ?: 0,
-                        name.text.toString().trim(),
-                        p,
-                        group.text.toString().trim(),
-                        existing?.optedOut ?: false
-                    )
-                )
-                showTab(1)
-            }
-        }
-        .setNeutralButton(
-            if (existing?.optedOut == true) "فعال‌سازی دریافت" else "عدم دریافت"
-        ) { _, _ ->
-            if (existing != null) {
-                lifecycleScope.launch {
-                    db.contactDao().setOptOut(
-                        existing.phone,
-                        !existing.optedOut
-                    )
-                    showTab(1)
+    private fun contactDialog(existing:ContactEntity?) {
+        val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;layoutDirection=rtl}
+        val name=EditText(this).apply{hint="نام و نام خانوادگی";setText(existing?.name?:"");setBackgroundResource(R.drawable.input_bg)}
+        val phone=EditText(this).apply{hint="شماره موبایل";setText(existing?.phone?:"");setBackgroundResource(R.drawable.input_bg)}
+        val group=EditText(this).apply{hint="گروه";setText(existing?.groupName?:"");setBackgroundResource(R.drawable.input_bg)}
+        box.addView(name,marginParams());box.addView(phone,marginParams());box.addView(group,marginParams())
+        AlertDialog.Builder(this).setTitle(if(existing==null)"افزودن مخاطب" else "ویرایش مخاطب").setView(box)
+            .setPositiveButton("ذخیره"){_,_->
+                val p=phone.text.toString().trim()
+                if(p.isBlank()){toast("شماره موبایل را وارد کنید.");return@setPositiveButton}
+                lifecycleScope.launch{
+                    db.contactDao().upsert(ContactEntity(existing?.id?:0,name.text.toString().trim(),p,group.text.toString().trim(),existing?.optedOut?:false))
+                    contacts()
                 }
             }
-        }
-        .setNegativeButton(
-            if (existing == null) "انصراف" else "حذف"
-        ) { _, _ ->
-            if (existing != null) {
-                lifecycleScope.launch {
-                    db.contactDao().deleteById(existing.id)
-                    showTab(1)
-                }
+            .setNeutralButton(if(existing?.optedOut==true)"فعال‌سازی دریافت" else "عدم دریافت"){_,_->
+                if(existing!=null) lifecycleScope.launch{db.contactDao().setOptOut(existing.phone,!existing.optedOut);contacts()}
             }
-        }
-        .create()
+            .setNegativeButton(if(existing==null)"انصراف" else "حذف"){_,_->
+                if(existing!=null) lifecycleScope.launch{db.contactDao().deleteById(existing.id);contacts()}
+            }.show()
+    }
 
-    dialog.show()
-}
-
-private fun sending() {
+    private fun sending() {
         addTitle("ارسال پیامک")
         addText("پیام خود را آماده کنید و قبل از ارسال تعداد گیرندگان را بررسی کنید.")
         val group=styledInput("گروه — خالی یعنی همه")
