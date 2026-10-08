@@ -35,6 +35,10 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.CreateDocument("text/csv")
     ) { uri -> if (uri != null) exportCsv(uri) }
 
+    private val importLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) askGroupAndImport(uri) }
+
     private val rtl = android.view.View.LAYOUT_DIRECTION_RTL
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -238,6 +242,7 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(search, marginParams())
         addButton("＋  افزودن مخاطب"){contactDialog(null)}
+        addButton("📄  وارد کردن شماره‌ها از فایل TXT"){importLauncher.launch(arrayOf("*/*"))}
         val list=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
         content.addView(list)
         fun load(q:String="") {
@@ -256,6 +261,60 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(e:android.text.Editable?){}
         })
         load()
+    }
+
+    private fun toAsciiDigits(t: String): String {
+        val sb = StringBuilder()
+        for (ch in t) {
+            when (ch) {
+                in '۰'..'۹' -> sb.append('0' + (ch - '۰'))
+                in '٠'..'٩' -> sb.append('0' + (ch - '٠'))
+                else -> sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun parseIranPhone(raw: String): String? {
+        var d = toAsciiDigits(raw).filter { it in '0'..'9' }
+        if (d.startsWith("0098")) d = d.substring(4)
+        else if (d.startsWith("98") && d.length == 12) d = d.substring(2)
+        if (d.length == 10 && d.startsWith("9")) d = "0$d"
+        return if (d.length == 11 && d.startsWith("09")) d else null
+    }
+
+    private fun askGroupAndImport(uri: Uri) {
+        val input = styledInput("نام گروه (اختیاری)")
+        AlertDialog.Builder(this).setTitle("وارد کردن از فایل")
+            .setMessage("گروه مخاطبین جدید را وارد کنید (می‌توانید خالی بگذارید).")
+            .setView(input)
+            .setPositiveButton("وارد کردن") { _, _ -> importTxt(uri, input.text.toString().trim()) }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun importTxt(uri: Uri, group: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val text = contentResolver.openInputStream(uri)?.use { String(it.readBytes(), Charsets.UTF_8) }?.removePrefix("\uFEFF") ?: ""
+                val tokens = text.split(Regex("[\\r\\n,;،؛]+")).map { it.trim() }.filter { it.isNotEmpty() }
+                val existing = db.contactDao().getAll().map { parseIranPhone(it.phone) ?: it.phone }.toHashSet()
+                var added = 0; var dup = 0; var bad = 0
+                for (t in tokens) {
+                    val ph = parseIranPhone(t)
+                    if (ph == null) { bad++; continue }
+                    if (!existing.add(ph)) { dup++; continue }
+                    db.contactDao().upsert(ContactEntity(phone = ph, groupName = group))
+                    added++
+                }
+                withContext(Dispatchers.Main) {
+                    AlertDialog.Builder(this@MainActivity).setTitle("نتیجه وارد کردن")
+                        .setMessage("شماره‌های خوانده‌شده از فایل: ${tokens.size}\n✅ افزوده‌شده: $added\n🔁 تکراری: $dup\n⚠️ نامعتبر: $bad")
+                        .setPositiveButton("تأیید") { _, _ -> showTab(1) }.show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { toast("خطا در خواندن فایل: ${e.message}") }
+            }
+        }
     }
 
     private fun contactCard(c:ContactEntity): View {
