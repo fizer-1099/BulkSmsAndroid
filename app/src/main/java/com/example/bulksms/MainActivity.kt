@@ -41,6 +41,37 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         db = AppDatabase.get(this)
         buildUi()
+        if (!hasSmsPerm() || !hasPhonePerm()) {
+            permLauncher.launch(arrayOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE))
+        }
+    }
+
+    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+    private fun hasSmsPerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.SEND_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    private fun hasPhonePerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    private val tabViews = mutableListOf<TextView>()
+
+    private fun smsManager(subId: Int): SmsManager {
+        return if (android.os.Build.VERSION.SDK_INT >= 31) {
+            val base = getSystemService(SmsManager::class.java)
+            if (subId >= 0) base.createForSubscriptionId(subId) else base
+        } else {
+            @Suppress("DEPRECATION")
+            if (subId >= 0) SmsManager.getSmsManagerForSubscriptionId(subId) else SmsManager.getDefault()
+        }
+    }
+
+    private fun normalizePhone(p: String): String {
+        val sb = StringBuilder()
+        for (ch in p) {
+            when (ch) {
+                in '۰'..'۹' -> sb.append('0' + (ch - '۰'))
+                in '٠'..'٩' -> sb.append('0' + (ch - '٠'))
+                in '0'..'9', '+' -> sb.append(ch)
+                else -> {}
+            }
+        }
+        return sb.toString()
     }
 
     private fun buildUi() {
@@ -50,6 +81,12 @@ class MainActivity : AppCompatActivity() {
             textDirection = View.TEXT_DIRECTION_RTL
             setPadding(dp(14), dp(12), dp(14), dp(10))
             setBackgroundColor(Color.rgb(246,248,252))
+        }
+
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val b = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            v.setPadding(dp(14), b.top + dp(12), dp(14), b.bottom + dp(10))
+            insets
         }
 
         val header = LinearLayout(this).apply {
@@ -101,7 +138,8 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(14),dp(10),dp(14),dp(10))
                 setOnClickListener { showTab(i) }
             }
-            tabs.addView(b)
+            tabViews.add(b)
+            tabs.addView(b, LinearLayout.LayoutParams(-2,-2).apply{setMargins(dp(3),dp(3),dp(3),dp(3))})
         }
         tabsScroll.addView(tabs)
         root.addView(tabsScroll)
@@ -120,30 +158,34 @@ class MainActivity : AppCompatActivity() {
         showTab(0)
     }
 
-
-    private fun exportCsv(uri: android.net.Uri) {
-        lifecycleScope.launch {
+    private fun exportCsv(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val rows = db.sendLogDao().latest(100000)
                 val sb = StringBuilder("\uFEFFphone,message,group,status\n")
+                fun q(v: String) = "\"" + v.replace("\"", "\"\"") + "\""
                 for (r in rows) {
-                    fun q(v: String) = "\"" + v.replace("\"", "\"\"") + "\""
-                    sb.append(q(r.phone)).append(',')
-                        .append(q(r.message)).append(',')
-                        .append(q(r.groupName)).append(',')
-                        .append(q(r.status)).append('\n')
+                    sb.append(q(r.phone)).append(',').append(q(r.message)).append(',')
+                        .append(q(r.groupName)).append(',').append(q(r.status)).append('\n')
                 }
-                contentResolver.openOutputStream(uri)?.use {
-                    it.write(sb.toString().toByteArray(Charsets.UTF_8))
-                }
-                android.widget.Toast.makeText(this@MainActivity, "ذخیره شد", android.widget.Toast.LENGTH_SHORT).show()
+                contentResolver.openOutputStream(uri)?.use { it.write(sb.toString().toByteArray(Charsets.UTF_8)) }
+                withContext(Dispatchers.Main) { toast("ذخیره شد") }
             } catch (e: Exception) {
-                android.widget.Toast.makeText(this@MainActivity, "خطا: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                withContext(Dispatchers.Main) { toast("خطا: ${e.message}") }
             }
         }
     }
 
     private fun showTab(tab:Int) {
+        tabViews.forEachIndexed { i, t ->
+            if (i == tab) {
+                t.setTextColor(Color.WHITE)
+                t.background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = dp(20).toFloat(); setColor(BLUE) }
+            } else {
+                t.setTextColor(Color.rgb(51,65,85))
+                t.background = null
+            }
+        }
         content.removeAllViews()
         when(tab) {
             0 -> dashboard()
@@ -222,90 +264,34 @@ class MainActivity : AppCompatActivity() {
         }
         box.addView(TextView(this).apply{text=c.name.ifBlank{"بدون نام"};textSize=17f;setTextColor(Color.rgb(15,23,42))})
         box.addView(TextView(this).apply{text=c.phone;textSize=14f;setTextColor(Color.rgb(71,85,105))})
-        box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)Color.rgb(185,28,28) else Color.rgb(71,85,105))})
+        box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)Color.rgb(185,28,28)Color.rgb(71,85,105))})
         return box
     }
 
-    private fun contactDialog(existing: ContactEntity?) {
-    val box = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        layoutDirection = rtl
-    }
-
-    val name = EditText(this).apply {
-        hint = "نام و نام خانوادگی"
-        setText(existing?.name ?: "")
-        setBackgroundResource(R.drawable.input_bg)
-    }
-
-    val phone = EditText(this).apply {
-        hint = "شماره موبایل"
-        setText(existing?.phone ?: "")
-        setBackgroundResource(R.drawable.input_bg)
-    }
-
-    val group = EditText(this).apply {
-        hint = "گروه"
-        setText(existing?.groupName ?: "")
-        setBackgroundResource(R.drawable.input_bg)
-    }
-
-    box.addView(name, marginParams())
-    box.addView(phone, marginParams())
-    box.addView(group, marginParams())
-
-    val dialog = AlertDialog.Builder(this)
-        .setTitle(if (existing == null) "افزودن مخاطب" else "ویرایش مخاطب")
-        .setView(box)
-        .setPositiveButton("ذخیره") { _, _ ->
-            val p = phone.text.toString().trim()
-            if (p.isBlank()) {
-                toast("شماره موبایل را وارد کنید.")
-                return@setPositiveButton
-            }
-
-            lifecycleScope.launch {
-                db.contactDao().upsert(
-                    ContactEntity(
-                        existing?.id ?: 0,
-                        name.text.toString().trim(),
-                        p,
-                        group.text.toString().trim(),
-                        existing?.optedOut ?: false
-                    )
-                )
-                showTab(1)
-            }
-        }
-        .setNeutralButton(
-            if (existing?.optedOut == true) "فعال‌سازی دریافت" else "عدم دریافت"
-        ) { _, _ ->
-            if (existing != null) {
-                lifecycleScope.launch {
-                    db.contactDao().setOptOut(
-                        existing.phone,
-                        !existing.optedOut
-                    )
-                    showTab(1)
+    private fun contactDialog(existing:ContactEntity?) {
+        val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;layoutDirection=rtl}
+        val name=EditText(this).apply{hint="نام و نام خانوادگی";setText(existing?.name?:"");setBackgroundResource(R.drawable.input_bg)}
+        val phone=EditText(this).apply{hint="شماره موبایل";setText(existing?.phone?:"");setBackgroundResource(R.drawable.input_bg)}
+        val group=EditText(this).apply{hint="گروه";setText(existing?.groupName?:"");setBackgroundResource(R.drawable.input_bg)}
+        box.addView(name,marginParams());box.addView(phone,marginParams());box.addView(group,marginParams())
+        AlertDialog.Builder(this).setTitle(if(existing==null)"افزودن مخاطب" else "ویرایش مخاطب").setView(box)
+            .setPositiveButton("ذخیره"){_,_->
+                val p=phone.text.toString().trim()
+                if(p.isBlank()){toast("شماره موبایل را وارد کنید.");return@setPositiveButton}
+                lifecycleScope.launch{
+                    db.contactDao().upsert(ContactEntity(existing?.id?:0,name.text.toString().trim(),p,group.text.toString().trim(),existing?.optedOut?:false))
+                    contacts()
                 }
             }
-        }
-        .setNegativeButton(
-            if (existing == null) "انصراف" else "حذف"
-        ) { _, _ ->
-            if (existing != null) {
-                lifecycleScope.launch {
-                    db.contactDao().deleteById(existing.id)
-                    showTab(1)
-                }
+            .setNeutralButton(if(existing?.optedOut==true)"فعال‌سازی دریافت" else "عدم دریافت"){_,_->
+                if(existing!=null) lifecycleScope.launch{db.contactDao().setOptOut(existing.phone,!existing.optedOut);contacts()}
             }
-        }
-        .create()
+            .setNegativeButton(if(existing==null)"انصراف" else "حذف"){_,_->
+                if(existing!=null) lifecycleScope.launch{db.contactDao().deleteById(existing.id);contacts()}
+            }.show()
+    }
 
-    dialog.show()
-}
-
-private fun sending() {
+    private fun sending() {
         addTitle("ارسال پیامک")
         addText("پیام خود را آماده کنید و قبل از ارسال تعداد گیرندگان را بررسی کنید.")
         val group=styledInput("گروه — خالی یعنی همه")
@@ -329,6 +315,11 @@ private fun sending() {
     }
 
     private fun confirmSend(group:String,text:String,interval:Int) {
+        if(!hasSmsPerm()){
+            permLauncher.launch(arrayOf(android.Manifest.permission.SEND_SMS,android.Manifest.permission.READ_PHONE_STATE))
+            toast("مجوز ارسال پیامک را تأیید کنید و دوباره تلاش کنید.")
+            return
+        }
         lifecycleScope.launch(Dispatchers.IO) {
             val contacts=db.contactDao().eligible(group)
             withContext(Dispatchers.Main) {
@@ -343,12 +334,12 @@ private fun sending() {
 
     private suspend fun sendMessages(contacts:List<ContactEntity>,template:String,group:String,interval:Int) {
         if(contacts.isEmpty()){withContext(Dispatchers.Main){toast("مخاطب واجد شرایطی پیدا نشد.")};return}
-        val sms=if(selectedSubscriptionId>=0)SmsManager.getSmsManagerForSubscriptionId(selectedSubscriptionId)else SmsManager.getDefault()
+        val sms=try{smsManager(selectedSubscriptionId)}catch(e:Exception){withContext(Dispatchers.Main){toast("خطا در سیم‌کارت: ${e.message}")};return}
         var ok=0;var fail=0
         withContext(Dispatchers.Main){progress.max=contacts.size;progress.progress=0}
         contacts.forEachIndexed{i,c->
             val text=template.replace("{نام}",c.name.ifBlank{"دوست عزیز"})
-            try{sms.sendTextMessage(c.phone,null,text,null,null);db.sendLogDao().insert(SendLogEntity(phone=c.phone,message=text,groupName=group,status="موفق"));ok++}
+            try{val num=normalizePhone(c.phone);val parts=sms.divideMessage(text);if(parts.size>1)sms.sendMultipartTextMessage(num,null,parts,null,null)else sms.sendTextMessage(num,null,text,null,null);db.sendLogDao().insert(SendLogEntity(phone=c.phone,message=text,groupName=group,status="موفق"));ok++}
             catch(e:Exception){db.sendLogDao().insert(SendLogEntity(phone=c.phone,message=text,groupName=group,status="ناموفق: ${e.message?:"خطای نامشخص"}"));fail++}
             withContext(Dispatchers.Main){
                 progress.progress=i+1
@@ -368,9 +359,9 @@ private fun sending() {
 
     private fun selectSim() {
         if(android.os.Build.VERSION.SDK_INT<22){toast("انتخاب سیم‌کارت در این نسخه اندروید پشتیبانی نمی‌شود.");return}
-        if(androidx.core.content.ContextCompat.checkSelfPermission(this,android.Manifest.permission.READ_PHONE_STATE)!=android.content.pm.PackageManager.PERMISSION_GRANTED){
-            androidx.core.app.ActivityCompat.requestPermissions(this,arrayOf(android.Manifest.permission.READ_PHONE_STATE,android.Manifest.permission.SEND_SMS),1001)
-            toast("مجوز را تایید کنید و دوباره روی انتخاب سیم‌کارت بزنید.")
+        if(!hasPhonePerm()){
+            permLauncher.launch(arrayOf(android.Manifest.permission.SEND_SMS,android.Manifest.permission.READ_PHONE_STATE))
+            toast("مجوز را تأیید کنید و دوباره روی انتخاب سیم‌کارت بزنید.")
             return
         }
         val sm=getSystemService(SubscriptionManager::class.java)
@@ -490,7 +481,12 @@ private fun sending() {
     private fun addTitle(t:String){content.addView(TextView(this).apply{text=t;textSize=24f;setTextColor(Color.rgb(15,23,42));gravity=Gravity.RIGHT;setPadding(0,dp(5),0,dp(4))})}
     private fun addSection(t:String){content.addView(TextView(this).apply{text=t;textSize=17f;setTextColor(Color.rgb(51,65,85));gravity=Gravity.RIGHT;setPadding(0,dp(16),0,dp(7))})}
     private fun addText(t:String){content.addView(TextView(this).apply{text=t;textSize=15f;setTextColor(Color.rgb(71,85,105));gravity=Gravity.RIGHT;setPadding(0,dp(5),0,dp(5))})}
-    private fun addButton(t:String,a:()->Unit){content.addView(Button(this).apply{text=t;textSize=15f;setOnClickListener{a()};layoutDirection=rtl},marginParams())}
+    private val BLUE = Color.rgb(37, 99, 235)
+    private fun addButton(t:String,a:()->Unit){content.addView(Button(this).apply{
+        text=t;textSize=15f;isAllCaps=false;setTextColor(Color.WHITE)
+        background=android.graphics.drawable.GradientDrawable().apply{cornerRadius=dp(14).toFloat();setColor(BLUE)}
+        setPadding(dp(14),dp(12),dp(14),dp(12))
+        setOnClickListener{a()};layoutDirection=rtl},marginParams())}
     private fun statCard(label:String,value:String,icon:String):View{
         val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;gravity=Gravity.RIGHT;setPadding(dp(14),dp(13),dp(14),dp(13));setBackgroundResource(R.drawable.card_bg)}
         box.addView(TextView(this).apply{text="$icon  $label";textSize=14f;setTextColor(Color.rgb(71,85,105));gravity=Gravity.RIGHT})
@@ -498,8 +494,8 @@ private fun sending() {
         return box
     }
     private fun addActionCard(icon:String,title:String,desc:String,a:()->Unit){
-        val box=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;layoutDirection=rtl;setPadding(dp(14),dp(12),dp(14),dp(12));setBackgroundResource(R.drawable.card_bg);setOnClickListener{a()}}
-        box.addView(TextView(this).apply{text=icon;textSize=27f;gravity=Gravity.CENTER},LinearLayout.LayoutParams(dp(48),dp(55)))
+        val box=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;layoutDirection=rtl;setPadding(dp(12),dp(6),dp(12),dp(6));setBackgroundResource(R.drawable.card_bg);setOnClickListener{a()}}
+        box.addView(TextView(this).apply{text=icon;textSize=27f;gravity=Gravity.CENTER},LinearLayout.LayoutParams(dp(44),dp(44)))
         val txt=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;gravity=Gravity.RIGHT}
         txt.addView(TextView(this).apply{text=title;textSize=17f;setTextColor(Color.rgb(15,23,42));gravity=Gravity.RIGHT})
         txt.addView(TextView(this).apply{text=desc;textSize=13f;setTextColor(Color.rgb(100,116,139));gravity=Gravity.RIGHT})

@@ -47,10 +47,10 @@ interface SendLogDao {
     @Query("SELECT * FROM send_logs ORDER BY timestamp DESC LIMIT :limit")
     suspend fun latest(limit: Int = 500): List<SendLogEntity>
 
-    @Query("SELECT COUNT(*) FROM send_logs WHERE status = 'SENT'")
+    @Query("SELECT COUNT(*) FROM send_logs WHERE status = 'موفق'")
     suspend fun sentCount(): Int
 
-    @Query("SELECT COUNT(*) FROM send_logs WHERE status = 'FAILED'")
+    @Query("SELECT COUNT(*) FROM send_logs WHERE status LIKE 'ناموفق%'")
     suspend fun failedCount(): Int
 
     @Query("DELETE FROM send_logs")

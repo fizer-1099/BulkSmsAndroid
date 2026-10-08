@@ -31,7 +31,9 @@ class ScheduledSmsWorker(
 
             for ((index, contact) in contacts.withIndex()) {
                 try {
-                    sms.sendTextMessage(contact.phone, null, message, null, null)
+                    val parts = sms.divideMessage(message)
+                    if (parts.size > 1) sms.sendMultipartTextMessage(contact.phone, null, parts, null, null)
+                    else sms.sendTextMessage(contact.phone, null, message, null, null)
                     db.sendLogDao().insert(
                         SendLogEntity(
                             phone = contact.phone,
