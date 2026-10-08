@@ -264,7 +264,7 @@ class MainActivity : AppCompatActivity() {
         }
         box.addView(TextView(this).apply{text=c.name.ifBlank{"بدون نام"};textSize=17f;setTextColor(Color.rgb(15,23,42))})
         box.addView(TextView(this).apply{text=c.phone;textSize=14f;setTextColor(Color.rgb(71,85,105))})
-        box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)Color.rgb(185,28,28)Color.rgb(71,85,105))})
+        box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)Color.rgb(185,28,28) else Color.rgb(71,85,105))})
         return box
     }
 
