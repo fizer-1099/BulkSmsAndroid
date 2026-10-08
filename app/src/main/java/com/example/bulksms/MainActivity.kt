@@ -104,7 +104,7 @@ class MainActivity : AppCompatActivity() {
         }
         val titleBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.RIGHT }
         titleBox.addView(TextView(this).apply {
-            text = "پیامک‌یار"
+            text = "اف پیامک"
             textSize = 27f
             setTextColor(Color.rgb(15,23,42))
         })
@@ -541,6 +541,7 @@ class MainActivity : AppCompatActivity() {
         addText("زبان: فارسی")
         addText("جهت برنامه: راست‌به‌چپ")
         addText("نسخه: ۲.۳.۰")
+        addText("سازنده: نوید بلانیان")
         addSection("حریم و رضایت")
         addText("ارسال فقط برای مخاطبانی انجام می‌شود که اجازه دریافت پیام دارند. مخاطبانِ دارای عدم دریافت از ارسال حذف می‌شوند.")
     }
