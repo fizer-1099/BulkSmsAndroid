@@ -368,6 +368,11 @@ private fun sending() {
 
     private fun selectSim() {
         if(android.os.Build.VERSION.SDK_INT<22){toast("انتخاب سیم‌کارت در این نسخه اندروید پشتیبانی نمی‌شود.");return}
+        if(androidx.core.content.ContextCompat.checkSelfPermission(this,android.Manifest.permission.READ_PHONE_STATE)!=android.content.pm.PackageManager.PERMISSION_GRANTED){
+            androidx.core.app.ActivityCompat.requestPermissions(this,arrayOf(android.Manifest.permission.READ_PHONE_STATE,android.Manifest.permission.SEND_SMS),1001)
+            toast("مجوز را تایید کنید و دوباره روی انتخاب سیم‌کارت بزنید.")
+            return
+        }
         val sm=getSystemService(SubscriptionManager::class.java)
         val list=try{sm.activeSubscriptionInfoList?:emptyList()}catch(_:SecurityException){emptyList()}
         if(list.isEmpty()){toast("سیم‌کارت فعالی پیدا نشد.");return}
