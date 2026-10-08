@@ -51,6 +51,10 @@ class MainActivity : AppCompatActivity() {
     private fun hasPhonePerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED
     private val tabViews = mutableListOf<TextView>()
 
+    private fun openAppSettings() {
+        startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+    }
+
     private fun smsManager(subId: Int): SmsManager {
         return if (android.os.Build.VERSION.SDK_INT >= 31) {
             val base = getSystemService(SmsManager::class.java)
@@ -132,17 +136,17 @@ class MainActivity : AppCompatActivity() {
         listOf("داشبورد","مخاطبین","ارسال","زمان‌بندی","گزارش‌ها","تنظیمات").forEachIndexed { i,t ->
             val b = TextView(this).apply {
                 text=t
-                textSize=14f
+                textSize=12f
                 gravity=Gravity.CENTER
                 setTextColor(Color.rgb(30,41,59))
-                setPadding(dp(14),dp(10),dp(14),dp(10))
+                setPadding(dp(2),dp(9),dp(2),dp(9))
+                maxLines=1
                 setOnClickListener { showTab(i) }
             }
             tabViews.add(b)
-            tabs.addView(b, LinearLayout.LayoutParams(-2,-2).apply{setMargins(dp(3),dp(3),dp(3),dp(3))})
+            tabs.addView(b, LinearLayout.LayoutParams(0,-2,1f).apply{setMargins(dp(1),dp(3),dp(1),dp(3))})
         }
-        tabsScroll.addView(tabs)
-        root.addView(tabsScroll)
+        root.addView(tabs)
 
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -317,7 +321,10 @@ class MainActivity : AppCompatActivity() {
     private fun confirmSend(group:String,text:String,interval:Int) {
         if(!hasSmsPerm()){
             permLauncher.launch(arrayOf(android.Manifest.permission.SEND_SMS,android.Manifest.permission.READ_PHONE_STATE))
-            toast("مجوز ارسال پیامک را تأیید کنید و دوباره تلاش کنید.")
+            AlertDialog.Builder(this).setTitle("مجوز ارسال پیامک")
+                .setMessage("برای ارسال، مجوز «ارسال پیامک» باید روی «اجازه دادن» باشد. تنظیمات برنامه را باز کنید.")
+                .setPositiveButton("باز کردن تنظیمات"){_,_->openAppSettings()}
+                .setNegativeButton("بعداً",null).show()
             return
         }
         lifecycleScope.launch(Dispatchers.IO) {
@@ -470,6 +477,7 @@ class MainActivity : AppCompatActivity() {
         addSection("تنظیمات ارسال")
         addButton("📱  انتخاب سیم‌کارت"){selectSim()}
         addButton("↩  استفاده از سیم‌کارت پیش‌فرض"){selectedSubscriptionId=-1;status.text="● سیم‌کارت پیش‌فرض فعال شد";toast("سیم‌کارت پیش‌فرض انتخاب شد.")}
+        addButton("🔐  مجوزها (باز کردن تنظیمات برنامه)"){openAppSettings()}
         addSection("اطلاعات برنامه")
         addText("زبان: فارسی")
         addText("جهت برنامه: راست‌به‌چپ")
