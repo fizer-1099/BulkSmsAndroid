@@ -32,6 +32,30 @@ interface ContactDao {
     @Query("DELETE FROM contacts")
     suspend fun deleteAll()
 
+    @Query("SELECT DISTINCT groupName FROM contacts ORDER BY groupName")
+    suspend fun groups(): List<String>
+
+    @Query("UPDATE contacts SET groupName = :newName WHERE groupName = :oldName")
+    suspend fun renameGroup(oldName: String, newName: String)
+
+    @Query("DELETE FROM contacts WHERE groupName = :g")
+    suspend fun deleteGroup(g: String)
+
+    @Query("DELETE FROM contacts WHERE id NOT IN (SELECT MIN(id) FROM contacts GROUP BY phone)")
+    suspend fun deleteDuplicates()
+
+    @Query("DELETE FROM contacts WHERE optedOut = 1")
+    suspend fun deleteOptedOut()
+
+    @Query("DELETE FROM contacts WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
+
+    @Query("UPDATE contacts SET groupName = :g WHERE id IN (:ids)")
+    suspend fun setGroup(ids: List<Long>, g: String)
+
+    @Query("UPDATE contacts SET optedOut = 1 WHERE phone IN (:phones)")
+    suspend fun optOutMany(phones: List<String>): Int
+
     @Query("SELECT COUNT(*) FROM contacts")
     suspend fun count(): Int
 

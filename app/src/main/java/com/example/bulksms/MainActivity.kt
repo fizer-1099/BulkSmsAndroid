@@ -45,7 +45,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         db = AppDatabase.get(this)
         buildUi()
-        if (!hasSmsPerm() || !hasPhonePerm()) {
+        if (!hasSmsPerm() || !hasPhonePerm() || !hasRecvPerm()) {
             permLauncher.launch(allPerms())
         }
     }
@@ -55,8 +55,307 @@ class MainActivity : AppCompatActivity() {
     private fun hasPhonePerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED
     private val tabViews = mutableListOf<TextView>()
 
+    private fun hasRecvPerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECEIVE_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    private val importCsvLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) importCsv(uri) }
+    private val contactsPermLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> if (ok) importPhoneContacts() else toast("مجوز مخاطبین داده نشد.") }
+    private val backupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> if (uri != null) writeBackup(uri) }
+    private val restoreLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) readBackup(uri) }
+
+    // ---------- templates ----------
+    private fun loadTemplates(): MutableList<String> {
+        val sp = getSharedPreferences("templates", Context.MODE_PRIVATE)
+        val raw = sp.getString("list", null)
+        val out = mutableListOf<String>()
+        if (raw == null) {
+            out.addAll(listOf(
+                "سلام {نام}، تخفیف ویژه امروز ما را از دست ندهید.",
+                "سلام {نام}، برای شما یک پیشنهاد ویژه داریم.",
+                "مشتری گرامی {نام}، از خرید شما سپاسگزاریم."
+            ))
+            saveTemplates(out)
+        } else {
+            val arr = org.json.JSONArray(raw)
+            for (i in 0 until arr.length()) out.add(arr.getString(i))
+        }
+        return out
+    }
+
+    private fun saveTemplates(l: List<String>) {
+        val arr = org.json.JSONArray()
+        l.forEach { arr.put(it) }
+        getSharedPreferences("templates", Context.MODE_PRIVATE).edit().putString("list", arr.toString()).apply()
+    }
+
+    private fun templateDialog(message: EditText) {
+        val list = loadTemplates()
+        val labels = (listOf("➕  ذخیره متن فعلی به‌عنوان قالب جدید") + list.map { if (it.length > 50) it.take(50) + "…" else it }).toTypedArray()
+        AlertDialog.Builder(this).setTitle("قالب‌های پیام").setItems(labels) { _, i ->
+            if (i == 0) {
+                val t = message.text.toString().trim()
+                if (t.isEmpty()) toast("ابتدا متن پیام را بنویسید.")
+                else { list.add(t); saveTemplates(list); toast("قالب ذخیره شد.") }
+            } else templateActions(message, list, i - 1)
+        }.setNegativeButton("بستن", null).show()
+    }
+
+    private fun templateActions(message: EditText, list: MutableList<String>, idx: Int) {
+        AlertDialog.Builder(this).setTitle("قالب").setMessage(list[idx])
+            .setPositiveButton("استفاده") { _, _ -> message.setText(list[idx]) }
+            .setNeutralButton("ویرایش") { _, _ ->
+                val input = styledInput("متن قالب", 4).apply { setText(list[idx]) }
+                AlertDialog.Builder(this).setTitle("ویرایش قالب").setView(input)
+                    .setPositiveButton("ذخیره") { _, _ ->
+                        val t = input.text.toString().trim()
+                        if (t.isNotEmpty()) { list[idx] = t; saveTemplates(list); toast("ذخیره شد.") }
+                    }
+                    .setNegativeButton("انصراف", null).show()
+            }
+            .setNegativeButton("حذف") { _, _ -> list.removeAt(idx); saveTemplates(list); toast("حذف شد.") }
+            .show()
+    }
+
+    // ---------- import ----------
+    private fun importMenu() {
+        AlertDialog.Builder(this).setTitle("وارد کردن مخاطبین")
+            .setItems(arrayOf("📄  فایل TXT (هر شماره در یک خط)", "📊  فایل CSV (نام، شماره، گروه)", "📱  مخاطبین گوشی")) { _, i ->
+                when (i) {
+                    0 -> importLauncher.launch(arrayOf("*/*"))
+                    1 -> importCsvLauncher.launch(arrayOf("*/*"))
+                    else -> {
+                        if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.READ_CONTACTS) == android.content.pm.PackageManager.PERMISSION_GRANTED) importPhoneContacts()
+                        else contactsPermLauncher.launch(android.Manifest.permission.READ_CONTACTS)
+                    }
+                }
+            }.setNegativeButton("بستن", null).show()
+    }
+
+    private fun importRows(rows: List<Triple<String, String, String>>) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val existing = db.contactDao().getAll().map { parseIranPhone(it.phone) ?: it.phone }.toHashSet()
+            var added = 0; var dup = 0; var bad = 0
+            for ((name, phone, group) in rows) {
+                val ph = parseIranPhone(phone)
+                if (ph == null) { bad++; continue }
+                if (!existing.add(ph)) { dup++; continue }
+                db.contactDao().upsert(ContactEntity(name = name.trim(), phone = ph, groupName = group.trim()))
+                added++
+            }
+            withContext(Dispatchers.Main) {
+                AlertDialog.Builder(this@MainActivity).setTitle("نتیجه وارد کردن")
+                    .setMessage("ردیف‌های خوانده‌شده: ${rows.size}\n✅ افزوده‌شده: $added\n🔁 تکراری: $dup\n⚠️ نامعتبر: $bad")
+                    .setPositiveButton("تأیید") { _, _ -> showTab(1) }.show()
+            }
+        }
+    }
+
+    private fun importCsv(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val text = contentResolver.openInputStream(uri)?.use { String(it.readBytes(), Charsets.UTF_8) }?.removePrefix("\uFEFF") ?: ""
+                val rows = mutableListOf<Triple<String, String, String>>()
+                for (line in text.split(Regex("[\\r\\n]+"))) {
+                    if (line.isBlank()) continue
+                    val cells = line.split(Regex("[,;\\t]")).map { it.trim().trim('"').trim() }
+                    val phone = cells.firstOrNull { parseIranPhone(it) != null }
+                    if (phone == null) {
+                        if (cells.none { c -> c.any { ch -> ch.isDigit() } }) continue
+                        rows.add(Triple("", cells.firstOrNull { it.isNotEmpty() } ?: line, ""))
+                        continue
+                    }
+                    val others = cells.filter { it != phone && it.isNotEmpty() }
+                    rows.add(Triple(others.getOrElse(0) { "" }, phone, others.getOrElse(1) { "" }))
+                }
+                importRows(rows)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { toast("خطا در خواندن فایل: ${e.message}") }
+            }
+        }
+    }
+
+    private fun importPhoneContacts() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val rows = mutableListOf<Triple<String, String, String>>()
+                val uriC = android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+                val cols = arrayOf(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER
+                )
+                contentResolver.query(uriC, cols, null, null, null)?.use { c ->
+                    while (c.moveToNext()) rows.add(Triple(c.getString(0) ?: "", c.getString(1) ?: "", ""))
+                }
+                importRows(rows)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { toast("خطا در خواندن مخاطبین: ${e.message}") }
+            }
+        }
+    }
+
+    // ---------- bulk tools ----------
+    private fun confirm(msg: String, action: suspend () -> Unit) {
+        AlertDialog.Builder(this).setMessage(msg)
+            .setPositiveButton("بله") { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    action()
+                    withContext(Dispatchers.Main) { toast("انجام شد."); showTab(1) }
+                }
+            }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun pickGroup(onPick: (String) -> Unit) {
+        lifecycleScope.launch {
+            val groups = withContext(Dispatchers.IO) { db.contactDao().groups() }.filter { it.isNotBlank() }
+            if (groups.isEmpty()) { toast("گروهی وجود ندارد."); return@launch }
+            AlertDialog.Builder(this@MainActivity).setTitle("انتخاب گروه")
+                .setItems(groups.toTypedArray()) { _, i -> onPick(groups[i]) }.show()
+        }
+    }
+
+    private fun bulkMenu() {
+        val items = arrayOf(
+            "☑  انتخاب چندتایی (حذف / تغییر گروه)",
+            "✏  تغییر نام یک گروه",
+            "🗑  حذف همه مخاطبین یک گروه",
+            "🧹  حذف شماره‌های تکراری",
+            "🚫  حذف مخاطبین «عدم دریافت»",
+            "⚠  حذف همه مخاطبین"
+        )
+        AlertDialog.Builder(this).setTitle("ابزارهای گروهی").setItems(items) { _, i ->
+            when (i) {
+                0 -> multiSelectDialog()
+                1 -> pickGroup { g ->
+                    val input = styledInput("نام جدید گروه")
+                    AlertDialog.Builder(this).setTitle("نام جدید برای «$g»").setView(input)
+                        .setPositiveButton("تغییر") { _, _ ->
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                db.contactDao().renameGroup(g, input.text.toString().trim())
+                                withContext(Dispatchers.Main) { toast("انجام شد."); showTab(1) }
+                            }
+                        }
+                        .setNegativeButton("انصراف", null).show()
+                }
+                2 -> pickGroup { g -> confirm("همه مخاطبین گروه «$g» حذف شوند؟") { db.contactDao().deleteGroup(g) } }
+                3 -> confirm("شماره‌های تکراری حذف شوند؟ (اولین مورد نگه داشته می‌شود)") { db.contactDao().deleteDuplicates() }
+                4 -> confirm("همه مخاطبین عدم‌دریافت حذف شوند؟") { db.contactDao().deleteOptedOut() }
+                else -> confirm("همه مخاطبین حذف شوند؟ این کار قابل بازگشت نیست.") { db.contactDao().deleteAll() }
+            }
+        }.setNegativeButton("بستن", null).show()
+    }
+
+    private fun multiSelectDialog() {
+        lifecycleScope.launch {
+            val rows = withContext(Dispatchers.IO) { db.contactDao().getAll() }
+            if (rows.isEmpty()) { toast("مخاطبی وجود ندارد."); return@launch }
+            val labels = rows.map { "${it.name.ifBlank { "بدون نام" }} — ${it.phone}" + (if (it.optedOut) " ⛔" else "") }.toTypedArray()
+            val checked = BooleanArray(rows.size)
+            fun ids(): List<Long> = rows.indices.filter { checked[it] }.map { rows[it].id }
+            AlertDialog.Builder(this@MainActivity).setTitle("انتخاب مخاطبین")
+                .setMultiChoiceItems(labels, checked) { _, i, c -> checked[i] = c }
+                .setPositiveButton("حذف انتخاب‌شده") { _, _ ->
+                    val sel = ids()
+                    if (sel.isEmpty()) toast("چیزی انتخاب نشده.")
+                    else lifecycleScope.launch(Dispatchers.IO) {
+                        sel.chunked(500).forEach { db.contactDao().deleteByIds(it) }
+                        withContext(Dispatchers.Main) { toast("${sel.size} مخاطب حذف شد."); showTab(1) }
+                    }
+                }
+                .setNeutralButton("تغییر گروه") { _, _ ->
+                    val sel = ids()
+                    if (sel.isEmpty()) toast("چیزی انتخاب نشده.")
+                    else {
+                        val input = styledInput("نام گروه")
+                        AlertDialog.Builder(this@MainActivity).setTitle("گروه جدید برای ${sel.size} مخاطب").setView(input)
+                            .setPositiveButton("ذخیره") { _, _ ->
+                                lifecycleScope.launch(Dispatchers.IO) {
+                                    sel.chunked(500).forEach { db.contactDao().setGroup(it, input.text.toString().trim()) }
+                                    withContext(Dispatchers.Main) { toast("انجام شد."); showTab(1) }
+                                }
+                            }
+                            .setNegativeButton("انصراف", null).show()
+                    }
+                }
+                .setNegativeButton("انصراف", null).show()
+        }
+    }
+
+    // ---------- backup ----------
+    private fun writeBackup(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val root = org.json.JSONObject()
+                val arr = org.json.JSONArray()
+                db.contactDao().getAll().forEach { c ->
+                    arr.put(org.json.JSONObject().put("name", c.name).put("phone", c.phone).put("group", c.groupName).put("optedOut", c.optedOut))
+                }
+                root.put("contacts", arr)
+                val t = org.json.JSONArray()
+                loadTemplates().forEach { t.put(it) }
+                root.put("templates", t)
+                val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
+                root.put("settings", org.json.JSONObject()
+                    .put("interval", sp.getInt("interval", 3))
+                    .put("jitter", sp.getInt("jitter", 3))
+                    .put("daily_limit", sp.getInt("daily_limit", 200)))
+                root.put("version", 1)
+                contentResolver.openOutputStream(uri)?.use { it.write(root.toString(2).toByteArray(Charsets.UTF_8)) }
+                withContext(Dispatchers.Main) { toast("پشتیبان ذخیره شد: ${arr.length()} مخاطب") }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { toast("خطا: ${e.message}") }
+            }
+        }
+    }
+
+    private fun readBackup(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val text = contentResolver.openInputStream(uri)?.use { String(it.readBytes(), Charsets.UTF_8) } ?: ""
+                val root = org.json.JSONObject(text)
+                val existing = db.contactDao().getAll().map { it.phone }.toHashSet()
+                var added = 0
+                val arr = root.optJSONArray("contacts")
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        val ph = o.optString("phone")
+                        if (ph.isBlank() || !existing.add(ph)) continue
+                        db.contactDao().upsert(ContactEntity(name = o.optString("name"), phone = ph, groupName = o.optString("group"), optedOut = o.optBoolean("optedOut", false)))
+                        added++
+                    }
+                }
+                val ta = root.optJSONArray("templates")
+                if (ta != null) {
+                    val l = mutableListOf<String>()
+                    for (i in 0 until ta.length()) l.add(ta.getString(i))
+                    if (l.isNotEmpty()) saveTemplates(l)
+                }
+                val so = root.optJSONObject("settings")
+                if (so != null) {
+                    getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
+                        .putInt("interval", so.optInt("interval", 3))
+                        .putInt("jitter", so.optInt("jitter", 3))
+                        .putInt("daily_limit", so.optInt("daily_limit", 200)).apply()
+                }
+                withContext(Dispatchers.Main) { toast("بازیابی شد: $added مخاطب جدید"); showTab(5) }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { toast("فایل پشتیبان معتبر نیست: ${e.message}") }
+            }
+        }
+    }
+
+    private fun repeatLabel(id: Long): String {
+        val r = getSharedPreferences("repeat", Context.MODE_PRIVATE).getString("repeat_$id", "NONE")
+        return when (r) {
+            "DAILY" -> "  •  تکرار روزانه"
+            "WEEKLY" -> "  •  تکرار هفتگی"
+            "MONTHLY" -> "  •  تکرار ماهانه"
+            else -> ""
+        }
+    }
+
     private fun allPerms(): Array<String> {
-        val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE)
+        val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE, android.Manifest.permission.RECEIVE_SMS)
         if (android.os.Build.VERSION.SDK_INT >= 33) l.add("android.permission.POST_NOTIFICATIONS")
         return l.toTypedArray()
     }
@@ -312,7 +611,8 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(search, marginParams())
         addButton("＋  افزودن مخاطب"){contactDialog(null)}
-        addButton("📄  وارد کردن شماره‌ها از فایل TXT"){importLauncher.launch(arrayOf("*/*"))}
+        addButton("📥  وارد کردن مخاطبین (TXT / CSV / گوشی)"){importMenu()}
+        addButton("🛠  ابزارهای گروهی و حذف"){bulkMenu()}
         val list=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
         content.addView(list)
         fun load(q:String="") {
@@ -433,6 +733,8 @@ class MainActivity : AppCompatActivity() {
         content.addView(group);content.addView(message)
         val counter=TextView(this).apply{textSize=12f;gravity=Gravity.RIGHT;setTextColor(Color.rgb(100,116,139));text="0 کاراکتر"}
         content.addView(counter)
+        val optTxt=android.widget.CheckBox(this).apply{text="افزودن «لغو۱۱» به انتهای پیام (مخاطب با پاسخ لغو۱۱ حذف می‌شود)";layoutDirection=rtl;textSize=13f}
+        content.addView(optTxt)
         message.addTextChangedListener(object:android.text.TextWatcher{
             override fun beforeTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){}
             override fun onTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){
@@ -452,7 +754,7 @@ class MainActivity : AppCompatActivity() {
         addButton("🚀  شروع ارسال"){
             val text=message.text.toString()
             if(text.isBlank()){toast("متن پیام را وارد کنید.");return@addButton}
-            confirmSend(group.text.toString().trim(),text,interval.text.toString().toIntOrNull()?.coerceAtLeast(0)?:3)
+            confirmSend(group.text.toString().trim(),if(optTxt.isChecked) text+"\nلغو۱۱" else text,interval.text.toString().toIntOrNull()?.coerceAtLeast(0)?:3)
         }
         progress=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply{max=100;progress=0}
         content.addView(progress,marginParams())
@@ -529,15 +831,6 @@ class MainActivity : AppCompatActivity() {
         }.show()
     }
 
-    private fun templateDialog(message:EditText) {
-        val templates=arrayOf(
-            "سلام {نام}، تخفیف ویژه امروز ما را از دست ندهید.",
-            "سلام {نام}، برای شما یک پیشنهاد ویژه داریم.",
-            "مشتری گرامی {نام}، از خرید شما سپاسگزاریم."
-        )
-        AlertDialog.Builder(this).setTitle("قالب‌های آماده").setItems(templates){_,i->message.setText(templates[i])}.show()
-    }
-
     private fun previewDialog(message:EditText) {
         AlertDialog.Builder(this).setTitle("پیش‌نمایش")
             .setMessage(message.text.toString().replace("{نام}","ابوالفضل").ifBlank{"متنی وارد نشده است."})
@@ -563,7 +856,7 @@ class MainActivity : AppCompatActivity() {
     private fun scheduleCard(s:ScheduleEntity,date:String):View {
         val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;layoutDirection=rtl;setPadding(dp(14),dp(12),dp(14),dp(12));setBackgroundResource(R.drawable.card_bg)}
         box.addView(TextView(this).apply{text="⏰ $date";textSize=17f})
-        box.addView(TextView(this).apply{text="گروه: ${s.groupName.ifBlank{"همه"}}  •  وضعیت: ${scheduleStatus(s.status)}";textSize=14f})
+        box.addView(TextView(this).apply{text="گروه: ${s.groupName.ifBlank{"همه"}}  •  وضعیت: ${scheduleStatus(s.status)}${repeatLabel(s.id)}";textSize=14f})
         val cancel=Button(this).apply{text="لغو این زمان‌بندی";isEnabled=s.status=="SCHEDULED";setOnClickListener{
             if(s.workRequestId.isNotBlank())try{WorkManager.getInstance(this@MainActivity).cancelWorkById(UUID.fromString(s.workRequestId))}catch(_:Exception){}
             lifecycleScope.launch{db.scheduleDao().setStatus(s.id,"CANCELLED");schedules()}
@@ -579,13 +872,14 @@ class MainActivity : AppCompatActivity() {
         val group=styledInput("گروه — خالی یعنی همه")
         val msg=styledInput("متن پیام",4)
         val interval=styledInput("فاصله بین پیام‌ها به ثانیه").apply{setText("3")}
-        box.addView(group);box.addView(msg);box.addView(interval)
+        val rep=android.widget.Spinner(this).apply{adapter=android.widget.ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,arrayOf("بدون تکرار","تکرار روزانه","تکرار هفتگی","تکرار ماهانه"));layoutDirection=rtl}
+        box.addView(group);box.addView(msg);box.addView(interval);box.addView(rep)
         AlertDialog.Builder(this).setTitle("زمان‌بندی پیامک").setView(box)
-            .setPositiveButton("انتخاب تاریخ و ساعت"){_,_->pickDateTime(group.text.toString(),msg.text.toString(),interval.text.toString().toIntOrNull()?:3)}
+            .setPositiveButton("انتخاب تاریخ و ساعت"){_,_->pickDateTime(group.text.toString(),msg.text.toString(),interval.text.toString().toIntOrNull()?:3,arrayOf("NONE","DAILY","WEEKLY","MONTHLY")[rep.selectedItemPosition])}
             .setNegativeButton("انصراف",null).show()
     }
 
-    private fun pickDateTime(group:String,msg:String,interval:Int){
+    private fun pickDateTime(group:String,msg:String,interval:Int,repeat:String="NONE"){
         val now=Calendar.getInstance()
         DatePickerDialog(this,{_,y,m,d->
             TimePickerDialog(this,{_,h,min->
@@ -594,6 +888,7 @@ class MainActivity : AppCompatActivity() {
                 lifecycleScope.launch(Dispatchers.IO){
                     val id=db.scheduleDao().insert(ScheduleEntity(groupName=group,message=msg,scheduledAt=cal.timeInMillis,intervalSeconds=interval,subscriptionId=selectedSubscriptionId))
                     val req=OneTimeWorkRequestBuilder<ScheduledSmsWorker>().setInputData(workDataOf("group" to group,"message" to msg,"interval" to interval,"subscriptionId" to selectedSubscriptionId,"scheduleId" to id)).setInitialDelay(delayMs,TimeUnit.MILLISECONDS).build()
+                    getSharedPreferences("repeat",Context.MODE_PRIVATE).edit().putString("repeat_$id",repeat).apply()
                     db.scheduleDao().update(ScheduleEntity(id,group,msg,cal.timeInMillis,interval,selectedSubscriptionId,req.id.toString(),"SCHEDULED"))
                     WorkManager.getInstance(this@MainActivity).enqueue(req)
                     withContext(Dispatchers.Main){toast("زمان‌بندی با موفقیت ثبت شد.")}
@@ -637,6 +932,8 @@ class MainActivity : AppCompatActivity() {
                 .putInt("jitter",toAsciiDigits(jit.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:3).apply()
             toast("ذخیره شد.")
         }
+        addButton("💽  گرفتن پشتیبان (مخاطبین، قالب‌ها، تنظیمات)"){backupLauncher.launch("bulksms_backup.json")}
+        addButton("♻  بازیابی از فایل پشتیبان"){restoreLauncher.launch(arrayOf("*/*"))}
         addButton("🔐  مجوزها (باز کردن تنظیمات برنامه)"){openAppSettings()}
         addSection("اطلاعات برنامه")
         addText("زبان: فارسی")
