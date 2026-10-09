@@ -46,7 +46,7 @@ class MainActivity : AppCompatActivity() {
         db = AppDatabase.get(this)
         buildUi()
         if (!hasSmsPerm() || !hasPhonePerm()) {
-            permLauncher.launch(arrayOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE))
+            permLauncher.launch(allPerms())
         }
     }
 
@@ -54,6 +54,75 @@ class MainActivity : AppCompatActivity() {
     private fun hasSmsPerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.SEND_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED
     private fun hasPhonePerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED
     private val tabViews = mutableListOf<TextView>()
+
+    private fun allPerms(): Array<String> {
+        val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE)
+        if (android.os.Build.VERSION.SDK_INT >= 33) l.add("android.permission.POST_NOTIFICATIONS")
+        return l.toTypedArray()
+    }
+
+    private var pollJob: kotlinx.coroutines.Job? = null
+
+    private fun launchService() {
+        if (!hasSmsPerm()) { toast("ابتدا مجوز ارسال پیامک را بدهید."); return }
+        androidx.core.content.ContextCompat.startForegroundService(
+            this, Intent(this, SendService::class.java).setAction(SendService.ACTION_START)
+        )
+    }
+
+    private fun startCampaign(contacts: List<ContactEntity>, template: String, group: String, interval: Int) {
+        if (contacts.isEmpty()) { toast("مخاطب واجد شرایطی پیدا نشد."); return }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val items = contacts.map { c ->
+                QueueItemEntity(
+                    phone = PhoneUtil.normalize(c.phone),
+                    message = template.replace("{نام}", c.name.ifBlank { "دوست عزیز" }),
+                    groupName = group,
+                    subscriptionId = selectedSubscriptionId
+                )
+            }
+            db.queueDao().clear()
+            db.queueDao().insertAll(items)
+            getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putInt("interval", interval).apply()
+            withContext(Dispatchers.Main) { launchService(); toast("ارسال در پس‌زمینه شروع شد.") }
+        }
+    }
+
+    private fun resendFailed() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val failed = db.sendLogDao().failedLogs().distinctBy { it.phone }
+            if (failed.isEmpty()) { withContext(Dispatchers.Main) { toast("ارسال ناموفقی وجود ندارد.") }; return@launch }
+            db.queueDao().clear()
+            db.queueDao().insertAll(failed.map {
+                QueueItemEntity(phone = it.phone, message = it.message, groupName = it.groupName, subscriptionId = selectedSubscriptionId)
+            })
+            db.sendLogDao().markFailedRetried()
+            withContext(Dispatchers.Main) { launchService(); toast("${failed.size} پیام دوباره در صف قرار گرفت.") }
+        }
+    }
+
+    private fun cancelQueue() {
+        startService(Intent(this, SendService::class.java).setAction(SendService.ACTION_STOP))
+        lifecycleScope.launch(Dispatchers.IO) {
+            db.queueDao().clear()
+            withContext(Dispatchers.Main) { toast("صف ارسال لغو شد.") }
+        }
+    }
+
+    private fun startPolling() {
+        pollJob?.cancel()
+        pollJob = lifecycleScope.launch {
+            while (true) {
+                val total = withContext(Dispatchers.IO) { db.queueDao().totalCount() }
+                val done = withContext(Dispatchers.IO) { db.queueDao().doneCount() }
+                val pend = withContext(Dispatchers.IO) { db.queueDao().pendingCount() }
+                progress.max = maxOf(total, 1)
+                progress.progress = done
+                progressText.text = if (total == 0) "آماده ارسال" else "صف: $done از $total انجام شد  |  باقی‌مانده: $pend"
+                delay(1500)
+            }
+        }
+    }
 
     private fun openAppSettings() {
         startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
@@ -185,6 +254,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showTab(tab:Int) {
+        pollJob?.cancel()
         tabViews.forEachIndexed { i, t ->
             if (i == tab) {
                 t.setTextColor(Color.WHITE)
@@ -359,8 +429,23 @@ class MainActivity : AppCompatActivity() {
         addText("پیام خود را آماده کنید و قبل از ارسال تعداد گیرندگان را بررسی کنید.")
         val group=styledInput("گروه — خالی یعنی همه")
         val message=styledInput("متن پیام",5)
-        val interval=styledInput("فاصله بین پیام‌ها به ثانیه").apply{setText("3")}
-        content.addView(group);content.addView(message);content.addView(interval)
+        val interval=styledInput("فاصله بین پیام‌ها به ثانیه").apply{setText(getSharedPreferences("settings",Context.MODE_PRIVATE).getInt("interval",3).toString())}
+        content.addView(group);content.addView(message)
+        val counter=TextView(this).apply{textSize=12f;gravity=Gravity.RIGHT;setTextColor(Color.rgb(100,116,139));text="0 کاراکتر"}
+        content.addView(counter)
+        message.addTextChangedListener(object:android.text.TextWatcher{
+            override fun beforeTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){}
+            override fun onTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){
+                val t=s?.toString()?:""
+                val uni=t.any{it.code>127}
+                val single=if(uni)70 else 160
+                val multi=if(uni)67 else 153
+                val parts=if(t.isEmpty())0 else if(t.length<=single)1 else (t.length+multi-1)/multi
+                counter.text="${t.length} کاراکتر  •  $parts پیامک"
+            }
+            override fun afterTextChanged(e:android.text.Editable?){}
+        })
+        content.addView(interval)
         addButton("📱  انتخاب سیم‌کارت"){selectSim()}
         addButton("📝  قالب‌های آماده"){templateDialog(message)}
         addButton("👁  پیش‌نمایش"){previewDialog(message)}
@@ -373,6 +458,10 @@ class MainActivity : AppCompatActivity() {
         content.addView(progress,marginParams())
         progressText=TextView(this).apply{text="آماده ارسال";gravity=Gravity.RIGHT}
         content.addView(progressText)
+        addButton("▶  ادامه ارسال صف"){launchService()}
+        addButton("🔁  ارسال مجدد به ناموفق‌ها"){resendFailed()}
+        addButton("⏹  لغو صف باقی‌مانده"){cancelQueue()}
+        startPolling()
         addText("متغیر شخصی‌سازی: {نام}  ← نام مخاطب را جایگزین می‌کند.")
         addText("⛔ مخاطبانی که عدم دریافت را انتخاب کرده‌اند، ارسال دریافت نمی‌کنند.")
     }
@@ -392,7 +481,7 @@ class MainActivity : AppCompatActivity() {
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("تأیید ارسال")
                     .setMessage("گیرندگان مجاز: ${contacts.size}\nفاصله: $interval ثانیه\n\nارسال شروع شود؟")
-                    .setPositiveButton("شروع"){_,_->lifecycleScope.launch(Dispatchers.IO){sendMessages(contacts,text,group,interval)}}
+                    .setPositiveButton("شروع"){_,_->startCampaign(contacts,text,group,interval)}
                     .setNegativeButton("انصراف",null).show()
             }
         }
@@ -536,11 +625,23 @@ class MainActivity : AppCompatActivity() {
         addSection("تنظیمات ارسال")
         addButton("📱  انتخاب سیم‌کارت"){selectSim()}
         addButton("↩  استفاده از سیم‌کارت پیش‌فرض"){selectedSubscriptionId=-1;status.text="● سیم‌کارت پیش‌فرض فعال شد";toast("سیم‌کارت پیش‌فرض انتخاب شد.")}
+        val sp=getSharedPreferences("settings",Context.MODE_PRIVATE)
+        addText("حداکثر ارسال در روز (۰ = نامحدود)")
+        val lim=styledInput("مثلاً 200").apply{inputType=android.text.InputType.TYPE_CLASS_NUMBER;setText(sp.getInt("daily_limit",200).toString())}
+        content.addView(lim,marginParams())
+        addText("حداکثر تأخیر تصادفی اضافه بین پیام‌ها (ثانیه)")
+        val jit=styledInput("مثلاً 3").apply{inputType=android.text.InputType.TYPE_CLASS_NUMBER;setText(sp.getInt("jitter",3).toString())}
+        content.addView(jit,marginParams())
+        addButton("💾  ذخیره محدودیت‌ها"){
+            sp.edit().putInt("daily_limit",toAsciiDigits(lim.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:200)
+                .putInt("jitter",toAsciiDigits(jit.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:3).apply()
+            toast("ذخیره شد.")
+        }
         addButton("🔐  مجوزها (باز کردن تنظیمات برنامه)"){openAppSettings()}
         addSection("اطلاعات برنامه")
         addText("زبان: فارسی")
         addText("جهت برنامه: راست‌به‌چپ")
-        addText("نسخه: ۲.۳.۰")
+        addText("نسخه: ۳.۰.۰")
         addText("سازنده: نوید بلانیان")
         addSection("حریم و رضایت")
         addText("ارسال فقط برای مخاطبانی انجام می‌شود که اجازه دریافت پیام دارند. مخاطبانِ دارای عدم دریافت از ارسال حذف می‌شوند.")

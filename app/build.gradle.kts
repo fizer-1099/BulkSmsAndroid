@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.bulksms"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "2.4.0"
+        versionCode = 26
+        versionName = "2.6.0"
     }
 
     compileOptions {

@@ -42,16 +42,37 @@ interface ContactDao {
 @Dao
 interface SendLogDao {
     @Insert
-    suspend fun insert(log: SendLogEntity)
+    suspend fun insert(log: SendLogEntity): Long
 
     @Query("SELECT * FROM send_logs ORDER BY timestamp DESC LIMIT :limit")
     suspend fun latest(limit: Int = 500): List<SendLogEntity>
 
-    @Query("SELECT COUNT(*) FROM send_logs WHERE status = 'موفق'")
+    @Query("SELECT COUNT(*) FROM send_logs WHERE status IN ('موفق','ارسال\u200cشده','تحویل\u200cشده','ارسال\u200cشده (تحویل نشد)')")
     suspend fun sentCount(): Int
 
     @Query("SELECT COUNT(*) FROM send_logs WHERE status LIKE 'ناموفق%'")
     suspend fun failedCount(): Int
+
+    @Query("SELECT COUNT(*) FROM send_logs WHERE status = 'تحویل\u200cشده'")
+    suspend fun deliveredCount(): Int
+
+    @Query("SELECT COUNT(*) FROM send_logs WHERE timestamp >= :since AND status IN ('در حال ارسال','موفق','ارسال\u200cشده','تحویل\u200cشده','ارسال\u200cشده (تحویل نشد)')")
+    suspend fun countSince(since: Long): Int
+
+    @Query("SELECT * FROM send_logs WHERE status LIKE 'ناموفق%' ORDER BY timestamp DESC LIMIT 5000")
+    suspend fun failedLogs(): List<SendLogEntity>
+
+    @Query("UPDATE send_logs SET status = 'ارسال مجدد انجام شد' WHERE status LIKE 'ناموفق%'")
+    suspend fun markFailedRetried()
+
+    @Query("UPDATE send_logs SET status = :s WHERE id = :id")
+    suspend fun setStatus(id: Long, s: String)
+
+    @Query("UPDATE send_logs SET status = :s WHERE id = :id AND status NOT LIKE 'ناموفق%' AND status != 'تحویل\u200cشده'")
+    suspend fun markSent(id: Long, s: String)
+
+    @Query("UPDATE send_logs SET status = :s WHERE id = :id AND status NOT LIKE 'ناموفق%'")
+    suspend fun markDelivered(id: Long, s: String)
 
     @Query("DELETE FROM send_logs")
     suspend fun clear()
@@ -78,5 +99,30 @@ interface ScheduleDao {
     suspend fun delete(id: Long)
 
     @Query("DELETE FROM schedules")
+    suspend fun clear()
+}
+
+
+@Dao
+interface QueueDao {
+    @Insert
+    suspend fun insertAll(items: List<QueueItemEntity>)
+
+    @Query("SELECT * FROM queue_items WHERE state = 'PENDING' ORDER BY id LIMIT 1")
+    suspend fun nextPending(): QueueItemEntity?
+
+    @Query("UPDATE queue_items SET state = :state WHERE id = :id")
+    suspend fun setState(id: Long, state: String)
+
+    @Query("SELECT COUNT(*) FROM queue_items WHERE state = 'PENDING'")
+    suspend fun pendingCount(): Int
+
+    @Query("SELECT COUNT(*) FROM queue_items WHERE state = 'DONE'")
+    suspend fun doneCount(): Int
+
+    @Query("SELECT COUNT(*) FROM queue_items")
+    suspend fun totalCount(): Int
+
+    @Query("DELETE FROM queue_items")
     suspend fun clear()
 }
