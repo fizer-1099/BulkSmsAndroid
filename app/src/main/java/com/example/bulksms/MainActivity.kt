@@ -23,6 +23,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
 
+private var sessionUnlocked = false
+
 class MainActivity : AppCompatActivity() {
     private lateinit var db: AppDatabase
     private lateinit var content: LinearLayout
@@ -42,9 +44,16 @@ class MainActivity : AppCompatActivity() {
     private val rtl = android.view.View.LAYOUT_DIRECTION_RTL
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(
+            when (getSharedPreferences("settings", Context.MODE_PRIVATE).getInt("theme", 0)) {
+                1 -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
+                2 -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES
+                else -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+            }
+        )
         super.onCreate(savedInstanceState)
         db = AppDatabase.get(this)
-        buildUi()
+        if (isLockEnabled() && !sessionUnlocked) showLock() else { sessionUnlocked = true; buildUi(); maybeWelcome() }
         if (!hasSmsPerm() || !hasPhonePerm() || !hasRecvPerm()) {
             permLauncher.launch(allPerms())
         }
@@ -354,6 +363,188 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun col(id: Int) = androidx.core.content.ContextCompat.getColor(this, id)
+
+    // ---------- Jalali ----------
+    private fun fmtJalali(ms: Long, withTime: Boolean = true): String {
+        val c = Calendar.getInstance().apply { timeInMillis = ms }
+        val j = Jalali.toJalali(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH))
+        val d = "%04d/%02d/%02d".format(j[0], j[1], j[2])
+        return if (withTime) d + "  " + "%02d:%02d".format(c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE)) else d
+    }
+
+    private fun pickJalaliDate(onPicked: (Int, Int, Int) -> Unit) {
+        val now = Calendar.getInstance()
+        val j = Jalali.toJalali(now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1, now.get(Calendar.DAY_OF_MONTH))
+        val months = arrayOf("فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند")
+        val ny = NumberPicker(this).apply { minValue = j[0]; maxValue = j[0] + 5; value = j[0] }
+        val nm = NumberPicker(this).apply { minValue = 1; maxValue = 12; displayedValues = months; value = j[1] }
+        val nd = NumberPicker(this).apply { minValue = 1; maxValue = 31; value = j[2] }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            addView(nd); addView(nm); addView(ny)
+        }
+        AlertDialog.Builder(this).setTitle("تاریخ شمسی (سال / ماه / روز)").setView(row)
+            .setPositiveButton("ادامه") { _, _ ->
+                val g = Jalali.toGregorian(ny.value, nm.value, nd.value)
+                val back = Jalali.toJalali(g[0], g[1], g[2])
+                if (back[1] != nm.value || back[2] != nd.value) toast("این تاریخ در تقویم وجود ندارد.")
+                else onPicked(g[0], g[1], g[2])
+            }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    // ---------- theme / welcome ----------
+    private fun themeDialog() {
+        val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        AlertDialog.Builder(this).setTitle("حالت نمایش")
+            .setSingleChoiceItems(arrayOf("خودکار (مطابق گوشی)", "روشن", "تیره"), sp.getInt("theme", 0)) { d, i ->
+                sp.edit().putInt("theme", i).apply()
+                d.dismiss()
+                androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(
+                    when (i) {
+                        1 -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
+                        2 -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES
+                        else -> androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+                    }
+                )
+            }.show()
+    }
+
+    private fun maybeWelcome() {
+        val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        if (sp.getBoolean("welcomed", false)) return
+        sp.edit().putBoolean("welcomed", true).apply()
+        AlertDialog.Builder(this).setTitle("خوش آمدید 👋")
+            .setMessage("۱) از «مخاطبین» شماره‌ها را وارد کنید (TXT، CSV یا مخاطبین گوشی).\n۲) در «ارسال» متن را بنویسید و ارسال را شروع کنید؛ ارسال در پس‌زمینه ادامه پیدا می‌کند.\n۳) در «تنظیمات» سقف روزانه، رمز برنامه، حالت تیره و پشتیبان‌گیری را تنظیم کنید.\n\nفقط برای مخاطبانی پیام بفرستید که رضایت دارند.")
+            .setPositiveButton("متوجه شدم", null).show()
+    }
+
+    // ---------- app lock ----------
+    private fun lockPrefs() = getSharedPreferences("lock", Context.MODE_PRIVATE)
+    private fun isLockEnabled() = lockPrefs().getString("pin", null) != null
+    private var stoppedAt = 0L
+
+    override fun onStop() {
+        super.onStop()
+        stoppedAt = System.currentTimeMillis()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (isLockEnabled() && sessionUnlocked && System.currentTimeMillis() - stoppedAt > 60_000L && stoppedAt > 0L) {
+            sessionUnlocked = false
+            showLock()
+        }
+    }
+
+    private fun pinHash(p: String): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(("bulksms:" + toAsciiDigits(p).trim()).toByteArray())
+            .joinToString("") { "%02x".format(it) }
+
+    private fun canBiometric(): Boolean = try {
+        androidx.biometric.BiometricManager.from(this)
+            .canAuthenticate(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK) ==
+            androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS
+    } catch (e: Exception) { false }
+
+    private fun showBiometric() {
+        val executor = androidx.core.content.ContextCompat.getMainExecutor(this)
+        val prompt = androidx.biometric.BiometricPrompt(this, executor,
+            object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: androidx.biometric.BiometricPrompt.AuthenticationResult) {
+                    unlockNow()
+                }
+            })
+        val info = androidx.biometric.BiometricPrompt.PromptInfo.Builder()
+            .setTitle("ورود به برنامه")
+            .setNegativeButtonText("استفاده از رمز")
+            .setAllowedAuthenticators(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK)
+            .build()
+        prompt.authenticate(info)
+    }
+
+    private fun unlockNow() {
+        sessionUnlocked = true
+        buildUi()
+    }
+
+    private fun showLock() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutDirection = rtl
+            setPadding(dp(28), dp(28), dp(28), dp(28))
+            setBackgroundColor(col(R.color.app_bg))
+        }
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(box) { v, insets ->
+            val b = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            v.setPadding(dp(28), b.top + dp(28), dp(28), b.bottom + dp(28))
+            insets
+        }
+        box.addView(TextView(this).apply { text = "🔒"; textSize = 44f; gravity = Gravity.CENTER })
+        box.addView(TextView(this).apply {
+            text = "رمز برنامه را وارد کنید"; textSize = 18f; gravity = Gravity.CENTER
+            setTextColor(col(R.color.app_t1)); setPadding(0, dp(10), 0, dp(14))
+        })
+        val pin = styledInput("رمز").apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            gravity = Gravity.CENTER
+        }
+        box.addView(pin, LinearLayout.LayoutParams(-1, -2))
+        fun tryUnlock() {
+            if (pinHash(pin.text.toString()) == lockPrefs().getString("pin", "")) unlockNow()
+            else { toast("رمز اشتباه است."); pin.setText("") }
+        }
+        box.addView(Button(this).apply {
+            text = "ورود"; isAllCaps = false; setTextColor(Color.WHITE)
+            background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(BLUE) }
+            setOnClickListener { tryUnlock() }
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        pin.setOnEditorActionListener { _, _, _ -> tryUnlock(); true }
+        if (canBiometric()) {
+            box.addView(Button(this).apply {
+                text = "👆  ورود با اثر انگشت"; isAllCaps = false; setTextColor(Color.WHITE)
+                background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(BLUE) }
+                setOnClickListener { showBiometric() }
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        }
+        setContentView(box)
+        if (canBiometric()) showBiometric()
+    }
+
+    private fun askPin(title: String, onOk: (String) -> Unit) {
+        val input = styledInput("رمز").apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+        }
+        AlertDialog.Builder(this).setTitle(title).setView(input)
+            .setPositiveButton("تأیید") { _, _ -> onOk(input.text.toString()) }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun setNewPin() {
+        askPin("رمز جدید (حداقل ۴ رقم)") { p ->
+            val a = toAsciiDigits(p).trim()
+            if (a.length < 4) toast("رمز باید حداقل ۴ رقم باشد.")
+            else { lockPrefs().edit().putString("pin", pinHash(a)).apply(); toast("رمز فعال شد.") }
+        }
+    }
+
+    private fun lockSettings() {
+        if (!isLockEnabled()) { setNewPin(); return }
+        AlertDialog.Builder(this).setTitle("رمز برنامه")
+            .setItems(arrayOf("تغییر رمز", "غیرفعال کردن رمز")) { _, i ->
+                askPin("رمز فعلی") { cur ->
+                    if (pinHash(cur) != lockPrefs().getString("pin", "")) toast("رمز فعلی اشتباه است.")
+                    else if (i == 1) { lockPrefs().edit().remove("pin").apply(); toast("رمز غیرفعال شد.") }
+                    else setNewPin()
+                }
+            }.setNegativeButton("بستن", null).show()
+    }
+
     private fun allPerms(): Array<String> {
         val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE, android.Manifest.permission.RECEIVE_SMS)
         if (android.os.Build.VERSION.SDK_INT >= 33) l.add("android.permission.POST_NOTIFICATIONS")
@@ -451,12 +642,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildUi() {
+        tabViews.clear()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutDirection = rtl
             textDirection = View.TEXT_DIRECTION_RTL
             setPadding(dp(14), dp(12), dp(14), dp(10))
-            setBackgroundColor(Color.rgb(246,248,252))
+            setBackgroundColor(col(R.color.app_bg))
         }
 
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
@@ -474,18 +666,18 @@ class MainActivity : AppCompatActivity() {
         titleBox.addView(TextView(this).apply {
             text = "اف پیامک"
             textSize = 27f
-            setTextColor(Color.rgb(15,23,42))
+            setTextColor(col(R.color.app_t1))
         })
         titleBox.addView(TextView(this).apply {
             text = "مدیریت هوشمند پیامک"
             textSize = 13f
-            setTextColor(Color.rgb(100,116,139))
+            setTextColor(col(R.color.app_t4))
         })
         header.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(TextView(this).apply {
             text = "۲.۳"
             textSize = 13f
-            setTextColor(Color.rgb(71,85,105))
+            setTextColor(col(R.color.app_t3))
             setPadding(dp(10),dp(7),dp(10),dp(7))
             setBackgroundResource(com.example.bulksms.R.drawable.card_bg)
         })
@@ -494,7 +686,7 @@ class MainActivity : AppCompatActivity() {
         status = TextView(this).apply {
             text = "● آماده به کار"
             textSize = 13f
-            setTextColor(Color.rgb(22,101,52))
+            setTextColor(col(R.color.app_green))
             gravity = Gravity.RIGHT
             setPadding(0, dp(10), 0, dp(7))
         }
@@ -505,20 +697,19 @@ class MainActivity : AppCompatActivity() {
             layoutDirection = rtl
         }
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = rtl }
-        listOf("داشبورد","مخاطبین","ارسال","زمان‌بندی","گزارش‌ها","تنظیمات").forEachIndexed { i,t ->
+        listOf("🏠\nداشبورد","👥\nمخاطبین","✉️\nارسال","⏰\nزمان‌بندی","📊\nگزارش‌ها","⚙️\nتنظیمات").forEachIndexed { i,t ->
             val b = TextView(this).apply {
                 text=t
                 textSize=12f
                 gravity=Gravity.CENTER
-                setTextColor(Color.rgb(30,41,59))
+                setTextColor(col(R.color.app_t2))
                 setPadding(dp(2),dp(9),dp(2),dp(9))
-                maxLines=1
+                maxLines=2
                 setOnClickListener { showTab(i) }
             }
             tabViews.add(b)
             tabs.addView(b, LinearLayout.LayoutParams(0,-2,1f).apply{setMargins(dp(1),dp(3),dp(1),dp(3))})
         }
-        root.addView(tabs)
 
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -530,6 +721,8 @@ class MainActivity : AppCompatActivity() {
             addView(content)
         }, LinearLayout.LayoutParams(-1,0,1f))
 
+        tabs.setBackgroundResource(R.drawable.nav_bg)
+        root.addView(tabs, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         setContentView(root)
         showTab(0)
     }
@@ -559,11 +752,13 @@ class MainActivity : AppCompatActivity() {
                 t.setTextColor(Color.WHITE)
                 t.background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = dp(20).toFloat(); setColor(BLUE) }
             } else {
-                t.setTextColor(Color.rgb(51,65,85))
+                t.setTextColor(col(R.color.app_t2))
                 t.background = null
             }
         }
         content.removeAllViews()
+        content.alpha = 0f
+        content.animate().alpha(1f).setDuration(200).start()
         when(tab) {
             0 -> dashboard()
             1 -> contacts()
@@ -695,9 +890,9 @@ class MainActivity : AppCompatActivity() {
             setBackgroundResource(R.drawable.card_bg)
             setOnClickListener{contactDialog(c)}
         }
-        box.addView(TextView(this).apply{text=c.name.ifBlank{"بدون نام"};textSize=17f;setTextColor(Color.rgb(15,23,42))})
-        box.addView(TextView(this).apply{text=c.phone;textSize=14f;setTextColor(Color.rgb(71,85,105))})
-        box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)Color.rgb(185,28,28) else Color.rgb(71,85,105))})
+        box.addView(TextView(this).apply{text=c.name.ifBlank{"بدون نام"};textSize=17f;setTextColor(col(R.color.app_t1))})
+        box.addView(TextView(this).apply{text=c.phone;textSize=14f;setTextColor(col(R.color.app_t3))})
+        box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)col(R.color.app_red) else col(R.color.app_t3))})
         return box
     }
 
@@ -731,7 +926,7 @@ class MainActivity : AppCompatActivity() {
         val message=styledInput("متن پیام",5)
         val interval=styledInput("فاصله بین پیام‌ها به ثانیه").apply{setText(getSharedPreferences("settings",Context.MODE_PRIVATE).getInt("interval",3).toString())}
         content.addView(group);content.addView(message)
-        val counter=TextView(this).apply{textSize=12f;gravity=Gravity.RIGHT;setTextColor(Color.rgb(100,116,139));text="0 کاراکتر"}
+        val counter=TextView(this).apply{textSize=12f;gravity=Gravity.RIGHT;setTextColor(col(R.color.app_t4));text="0 کاراکتر"}
         content.addView(counter)
         val optTxt=android.widget.CheckBox(this).apply{text="افزودن «لغو۱۱» به انتهای پیام (مخاطب با پاسخ لغو۱۱ حذف می‌شود)";layoutDirection=rtl;textSize=13f}
         content.addView(optTxt)
@@ -802,13 +997,13 @@ class MainActivity : AppCompatActivity() {
                 progress.progress=i+1
                 progressText.text="در حال ارسال: ${i+1} از ${contacts.size}  |  موفق: $ok  |  ناموفق: $fail"
                 status.text="● در حال ارسال"
-                status.setTextColor(Color.rgb(180,83,9))
+                status.setTextColor(col(R.color.app_amber))
             }
             if(i<contacts.lastIndex&&interval>0)delay(interval*1000L)
         }
         withContext(Dispatchers.Main){
             status.text="● ارسال پایان یافت"
-            status.setTextColor(Color.rgb(22,101,52))
+            status.setTextColor(col(R.color.app_green))
             progressText.text="ارسال کامل شد — موفق: $ok | ناموفق: $fail"
             toast("ارسال پایان یافت.")
         }
@@ -847,7 +1042,7 @@ class MainActivity : AppCompatActivity() {
             val rows=db.scheduleDao().all()
             if(rows.isEmpty())addEmpty(list,"زمان‌بندی‌ای ثبت نشده است.")
             rows.forEach{s->
-                val d=SimpleDateFormat("yyyy/MM/dd — HH:mm",Locale.getDefault()).format(Date(s.scheduledAt))
+                val d=fmtJalali(s.scheduledAt)
                 list.addView(scheduleCard(s,d))
             }
         }
@@ -880,10 +1075,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun pickDateTime(group:String,msg:String,interval:Int,repeat:String="NONE"){
-        val now=Calendar.getInstance()
-        DatePickerDialog(this,{_,y,m,d->
+        pickJalaliDate{gy,gm,gd->
+            val now=Calendar.getInstance()
             TimePickerDialog(this,{_,h,min->
-                val cal=Calendar.getInstance().apply{set(y,m,d,h,min,0);set(Calendar.MILLISECOND,0)}
+                val cal=Calendar.getInstance().apply{set(gy,gm-1,gd,h,min,0);set(Calendar.MILLISECOND,0)}
                 val delayMs=(cal.timeInMillis-System.currentTimeMillis()).coerceAtLeast(1000L)
                 lifecycleScope.launch(Dispatchers.IO){
                     val id=db.scheduleDao().insert(ScheduleEntity(groupName=group,message=msg,scheduledAt=cal.timeInMillis,intervalSeconds=interval,subscriptionId=selectedSubscriptionId))
@@ -894,24 +1089,75 @@ class MainActivity : AppCompatActivity() {
                     withContext(Dispatchers.Main){toast("زمان‌بندی با موفقیت ثبت شد.")}
                 }
             },now.get(Calendar.HOUR_OF_DAY),now.get(Calendar.MINUTE),true).show()
-        },now.get(Calendar.YEAR),now.get(Calendar.MONTH),now.get(Calendar.DAY_OF_MONTH)).show()
+        }
     }
 
     private fun reports(){
         addTitle("گزارش‌ها")
-        addButton("📄  ذخیره گزارش CSV"){exportLauncher.launch("گزارش_پیامک.csv")}
+        val chart=SimpleBarChart(this).apply{textColor=col(R.color.app_t3)}
+        content.addView(chart,LinearLayout.LayoutParams(-1,dp(170)).apply{setMargins(0,dp(6),0,dp(10))})
+        val summary=TextView(this).apply{textSize=13f;setTextColor(col(R.color.app_t3));gravity=Gravity.RIGHT;setPadding(0,0,0,dp(6))}
+        content.addView(summary)
+        val spP=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,arrayOf("امروز","۷ روز اخیر","۳۰ روز اخیر","همه زمان‌ها"));setSelection(1);layoutDirection=rtl}
+        val spS=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,arrayOf("همه وضعیت‌ها","ارسال‌شده و تحویل‌شده","فقط تحویل‌شده","ناموفق","لغو توسط مخاطب"));layoutDirection=rtl}
+        val search=styledInput("🔎 جستجوی شماره یا متن")
+        content.addView(spP);content.addView(spS);content.addView(search,marginParams())
+        addButton("📄  ذخیره گزارش CSV (قابل باز شدن در اکسل)"){exportLauncher.launch("گزارش_پیامک.csv")}
         addButton("🗑  پاک کردن تاریخچه"){
             AlertDialog.Builder(this).setTitle("پاک کردن تاریخچه").setMessage("همه گزارش‌ها حذف شوند؟").setPositiveButton("بله"){_,_->lifecycleScope.launch{db.sendLogDao().clear();reports()}}.setNegativeButton("خیر",null).show()
         }
         val list=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
         content.addView(list)
         lifecycleScope.launch{
-            val rows=db.sendLogDao().latest(300)
-            if(rows.isEmpty())addEmpty(list,"هنوز گزارشی ثبت نشده است.")
-            rows.forEach{
-                val d=SimpleDateFormat("yyyy/MM/dd HH:mm:ss",Locale.getDefault()).format(Date(it.timestamp))
-                list.addView(TextView(this@MainActivity).apply{text="$d\n${it.phone}  •  ${it.status}\n${it.message}";textSize=14f;setPadding(0,10,0,10)})
+            val all=withContext(Dispatchers.IO){db.sendLogDao().latest(20000)}
+            val dayMs=86400000L
+            val todayStart=Calendar.getInstance().apply{set(Calendar.HOUR_OF_DAY,0);set(Calendar.MINUTE,0);set(Calendar.SECOND,0);set(Calendar.MILLISECOND,0)}.timeInMillis
+            fun isOk(st:String)=st==Status.SENT||st==Status.DELIVERED||st==Status.UNDELIVERED||st=="موفق"
+            val labels=ArrayList<String>();val okC=ArrayList<Int>();val failC=ArrayList<Int>()
+            for(k in 6 downTo 0){
+                val a=todayStart-k*dayMs;val b=a+dayMs
+                val dayRows=all.filter{it.timestamp>=a&&it.timestamp<b}
+                labels.add(fmtJalali(a,false).substring(5))
+                okC.add(dayRows.count{isOk(it.status)})
+                failC.add(dayRows.count{it.status.startsWith(Status.FAIL)})
             }
+            chart.labels=labels;chart.ok=okC;chart.fail=failC;chart.invalidate()
+            fun render(){
+                val now=System.currentTimeMillis()
+                val since=when(spP.selectedItemPosition){0->todayStart;1->now-7*dayMs;2->now-30*dayMs;else->0L}
+                val st=spS.selectedItemPosition
+                val q=toAsciiDigits(search.text.toString()).trim()
+                val rows=all.filter{r->
+                    r.timestamp>=since&&(when(st){
+                        0->true
+                        1->isOk(r.status)
+                        2->r.status==Status.DELIVERED
+                        3->r.status.startsWith(Status.FAIL)
+                        else->r.status.startsWith("لغو")
+                    })&&(q.isEmpty()||r.phone.contains(q)||r.message.contains(q))
+                }
+                summary.text="${rows.size} مورد  •  ✅ ${rows.count{isOk(it.status)}}  •  ❌ ${rows.count{it.status.startsWith(Status.FAIL)}}"
+                list.removeAllViews()
+                if(rows.isEmpty())addEmpty(list,"گزارشی با این فیلتر پیدا نشد.")
+                rows.take(200).forEach{
+                    list.addView(TextView(this@MainActivity).apply{text="${fmtJalali(it.timestamp)}\n${it.phone}  •  ${it.status}\n${it.message}";textSize=14f;setPadding(0,10,0,10)})
+                }
+                if(rows.size>200)list.addView(TextView(this@MainActivity).apply{text="۲۰۰ مورد اول نمایش داده شد؛ برای همه موارد، CSV بگیرید.";textSize=13f;setTextColor(col(R.color.app_t4));gravity=Gravity.CENTER;setPadding(0,dp(10),0,dp(10))})
+            }
+            spP.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
+                override fun onItemSelected(p:AdapterView<*>?,v:View?,pos:Int,id:Long){render()}
+                override fun onNothingSelected(p:AdapterView<*>?){}
+            }
+            spS.onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
+                override fun onItemSelected(p:AdapterView<*>?,v:View?,pos:Int,id:Long){render()}
+                override fun onNothingSelected(p:AdapterView<*>?){}
+            }
+            search.addTextChangedListener(object:android.text.TextWatcher{
+                override fun beforeTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){}
+                override fun onTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){render()}
+                override fun afterTextChanged(e:android.text.Editable?){}
+            })
+            render()
         }
     }
 
@@ -932,6 +1178,8 @@ class MainActivity : AppCompatActivity() {
                 .putInt("jitter",toAsciiDigits(jit.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:3).apply()
             toast("ذخیره شد.")
         }
+        addButton("🌓  حالت نمایش (روشن / تیره / خودکار)"){themeDialog()}
+        addButton("🔒  رمز و قفل برنامه"){lockSettings()}
         addButton("💽  گرفتن پشتیبان (مخاطبین، قالب‌ها، تنظیمات)"){backupLauncher.launch("bulksms_backup.json")}
         addButton("♻  بازیابی از فایل پشتیبان"){restoreLauncher.launch(arrayOf("*/*"))}
         addButton("🔐  مجوزها (باز کردن تنظیمات برنامه)"){openAppSettings()}
@@ -944,9 +1192,9 @@ class MainActivity : AppCompatActivity() {
         addText("ارسال فقط برای مخاطبانی انجام می‌شود که اجازه دریافت پیام دارند. مخاطبانِ دارای عدم دریافت از ارسال حذف می‌شوند.")
     }
 
-    private fun addTitle(t:String){content.addView(TextView(this).apply{text=t;textSize=24f;setTextColor(Color.rgb(15,23,42));gravity=Gravity.RIGHT;setPadding(0,dp(5),0,dp(4))})}
-    private fun addSection(t:String){content.addView(TextView(this).apply{text=t;textSize=17f;setTextColor(Color.rgb(51,65,85));gravity=Gravity.RIGHT;setPadding(0,dp(16),0,dp(7))})}
-    private fun addText(t:String){content.addView(TextView(this).apply{text=t;textSize=15f;setTextColor(Color.rgb(71,85,105));gravity=Gravity.RIGHT;setPadding(0,dp(5),0,dp(5))})}
+    private fun addTitle(t:String){content.addView(TextView(this).apply{text=t;textSize=24f;setTextColor(col(R.color.app_t1));gravity=Gravity.RIGHT;setPadding(0,dp(5),0,dp(4))})}
+    private fun addSection(t:String){content.addView(TextView(this).apply{text=t;textSize=17f;setTextColor(col(R.color.app_t2));gravity=Gravity.RIGHT;setPadding(0,dp(16),0,dp(7))})}
+    private fun addText(t:String){content.addView(TextView(this).apply{text=t;textSize=15f;setTextColor(col(R.color.app_t3));gravity=Gravity.RIGHT;setPadding(0,dp(5),0,dp(5))})}
     private val BLUE = Color.rgb(37, 99, 235)
     private fun addButton(t:String,a:()->Unit){content.addView(Button(this).apply{
         text=t;textSize=15f;isAllCaps=false;setTextColor(Color.WHITE)
@@ -955,21 +1203,21 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener{a()};layoutDirection=rtl},marginParams())}
     private fun statCard(label:String,value:String,icon:String):View{
         val box=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;gravity=Gravity.RIGHT;setPadding(dp(14),dp(13),dp(14),dp(13));setBackgroundResource(R.drawable.card_bg)}
-        box.addView(TextView(this).apply{text="$icon  $label";textSize=14f;setTextColor(Color.rgb(71,85,105));gravity=Gravity.RIGHT})
-        box.addView(TextView(this).apply{text=value;textSize=26f;setTextColor(Color.rgb(15,23,42));gravity=Gravity.RIGHT})
+        box.addView(TextView(this).apply{text="$icon  $label";textSize=14f;setTextColor(col(R.color.app_t3));gravity=Gravity.RIGHT})
+        box.addView(TextView(this).apply{text=value;textSize=26f;setTextColor(col(R.color.app_t1));gravity=Gravity.RIGHT})
         return box
     }
     private fun addActionCard(icon:String,title:String,desc:String,a:()->Unit){
         val box=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;layoutDirection=rtl;setPadding(dp(12),dp(6),dp(12),dp(6));setBackgroundResource(R.drawable.card_bg);setOnClickListener{a()}}
         box.addView(TextView(this).apply{text=icon;textSize=27f;gravity=Gravity.CENTER},LinearLayout.LayoutParams(dp(44),dp(44)))
         val txt=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;gravity=Gravity.RIGHT}
-        txt.addView(TextView(this).apply{text=title;textSize=17f;setTextColor(Color.rgb(15,23,42));gravity=Gravity.RIGHT})
-        txt.addView(TextView(this).apply{text=desc;textSize=13f;setTextColor(Color.rgb(100,116,139));gravity=Gravity.RIGHT})
+        txt.addView(TextView(this).apply{text=title;textSize=17f;setTextColor(col(R.color.app_t1));gravity=Gravity.RIGHT})
+        txt.addView(TextView(this).apply{text=desc;textSize=13f;setTextColor(col(R.color.app_t4));gravity=Gravity.RIGHT})
         box.addView(txt,LinearLayout.LayoutParams(0,-2,1f))
         content.addView(box,marginParams())
     }
     private fun styledInput(hint:String,lines:Int=1)=EditText(this).apply{this.hint=hint;minLines=lines;setBackgroundResource(R.drawable.input_bg);layoutDirection=rtl;textDirection=View.TEXT_DIRECTION_RTL;setPadding(dp(12),dp(10),dp(12),dp(10))}
-    private fun addEmpty(parent:LinearLayout,text:String){parent.addView(TextView(this).apply{this.text=text;textSize=15f;gravity=Gravity.CENTER;setPadding(0,dp(25),0,dp(25));setTextColor(Color.rgb(100,116,139))})}
+    private fun addEmpty(parent:LinearLayout,text:String){parent.addView(TextView(this).apply{this.text=text;textSize=15f;gravity=Gravity.CENTER;setPadding(0,dp(25),0,dp(25));setTextColor(col(R.color.app_t4))})}
     private fun marginParams()=LinearLayout.LayoutParams(-1,-2).apply{setMargins(0,dp(5),0,dp(5))}
     private fun weightParams()=LinearLayout.LayoutParams(0,-2,1f).apply{setMargins(dp(4),dp(4),dp(4),dp(4))}
     private fun dp(v:Int)= (v*resources.displayMetrics.density).toInt()

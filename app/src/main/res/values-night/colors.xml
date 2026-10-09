@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="app_bg">#0B1220</color>
+    <color name="app_card">#162032</color>
+    <color name="app_card_stroke">#2A3A52</color>
+    <color name="app_input_fill">#111B2E</color>
+    <color name="app_input_stroke">#3B4C66</color>
+    <color name="app_t1">#F1F5F9</color>
+    <color name="app_t2">#CBD5E1</color>
+    <color name="app_t3">#A8B5C8</color>
+    <color name="app_t4">#8696AD</color>
+    <color name="app_green">#4ADE80</color>
+    <color name="app_amber">#FBBF24</color>
+    <color name="app_red">#F87171</color>
+</resources>
