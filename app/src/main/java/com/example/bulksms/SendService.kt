@@ -101,6 +101,13 @@ class SendService : Service() {
                 finalText = "سقف ارسال روزانه ($limit) پر شد. ارسال متوقف شد؛ بعداً از تب «ارسال» ادامه دهید."
                 break
             }
+            val hf = prefs.getInt("hour_from", 0)
+            val ht = prefs.getInt("hour_to", 24)
+            val hr = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+            if (hf < ht && (hr < hf || hr >= ht)) {
+                finalText = "خارج از ساعت مجاز ارسال ($hf تا $ht). بعداً از تب «ارسال» ادامه دهید."
+                break
+            }
             sendOne(db, item)
             db.queueDao().setState(item.id, "DONE")
             val left = db.queueDao().pendingCount()

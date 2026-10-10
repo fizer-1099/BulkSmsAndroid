@@ -604,7 +604,7 @@ class MainActivity : AppCompatActivity() {
         val name = styledInput("نام مناسبت (مثلاً نوروز)")
         val group = styledInput("گروه — خالی یعنی همه")
         val msg = styledInput("متن پیام (می‌توانید {نام} بنویسید)", 4)
-        box.addView(name); box.addView(group); box.addView(msg)
+        box.addView(name); box.addView(group); box.addView(groupLink(group)); box.addView(msg)
         AlertDialog.Builder(this).setTitle("مناسبت جدید").setView(box)
             .setPositiveButton("انتخاب تاریخ") { _, _ ->
                 if (name.text.isBlank() || msg.text.isBlank()) toast("نام و متن پیام را وارد کنید.")
@@ -845,6 +845,172 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this).setTitle("راهنمای API")
             .setMessage("۱) مستندات «ارسال تکی پیامک» پنل خود را باز کنید و آدرس، روش (GET/POST) و پارامترها را در «تنظیمات اتصال» بنویسید.\n\n۲) به‌جای شماره و متن از متغیرها استفاده کنید: {phone} {phone98} {phoneplus98} {message} {sender}. مقدارها خودکار برای نوع بدنه (JSON، FORM یا آدرس) امن‌سازی می‌شوند.\n\n۳) مثال JSON:\n{\"to\":\"{phone}\",\"text\":\"{message}\"}\nهدر: Authorization: Bearer توکن\n\n۴) «کلمه موفقیت» را از پاسخ موفق پنل بردارید تا خطاهای پنهان (مثل اعتبار کم) هم ناموفق ثبت شوند.\n\n۵) بعد از «ارسال آزمایشی»، روش ارسال را روی API بگذارید. وضعیت «تحویل‌شده» برای API ثبت نمی‌شود، فقط «ارسال‌شده».\n\nکلید API روی همین گوشی ذخیره می‌شود و داخل فایل پشتیبان نیست.")
             .setPositiveButton("متوجه شدم", null).show()
+    }
+
+    // ---------- groups ----------
+    private var groupFilter: String? = null
+    private var presetGroup = ""
+
+    private fun chip(label: String, selected: Boolean, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 13f
+        setPadding(dp(14), dp(7), dp(14), dp(7))
+        background = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = dp(18).toFloat()
+            if (selected) setColor(BLUE) else { setColor(col(R.color.app_card)); setStroke(dp(1), col(R.color.app_card_stroke)) }
+        }
+        setTextColor(if (selected) Color.WHITE else col(R.color.app_t2))
+        setOnClickListener { onClick() }
+    }
+
+    private fun groupLink(target: EditText): TextView = TextView(this).apply {
+        text = "📁  انتخاب از گروه‌های موجود"
+        textSize = 13f
+        setTextColor(BLUE)
+        gravity = Gravity.RIGHT
+        setPadding(dp(4), dp(2), dp(4), dp(8))
+        setOnClickListener { pickGroup { g -> target.setText(g) } }
+    }
+
+    private fun groupsMenu() {
+        AlertDialog.Builder(this).setTitle("مدیریت گروه‌ها")
+            .setItems(arrayOf(
+                "➕  ساخت گروه جدید و افزودن مخاطبین",
+                "↔  انتقال مخاطبین به یک گروه",
+                "📋  فهرست گروه‌ها (تعداد، تغییر نام، حذف)"
+            )) { _, i ->
+                when (i) {
+                    0 -> newGroupDialog()
+                    1 -> moveContactsDialog()
+                    else -> groupListDialog()
+                }
+            }.setNegativeButton("بستن", null).show()
+    }
+
+    private fun selectContacts(title: String, okLabel: String, onDone: (List<Long>) -> Unit) {
+        lifecycleScope.launch {
+            val rows = withContext(Dispatchers.IO) { db.contactDao().getAll() }
+            if (rows.isEmpty()) { toast("مخاطبی وجود ندارد."); return@launch }
+            val labels = rows.map {
+                "${it.name.ifBlank { "بدون نام" }} — ${it.phone}" + (if (it.groupName.isBlank()) "" else "  [${it.groupName}]")
+            }.toTypedArray()
+            val checked = BooleanArray(rows.size)
+            val d = AlertDialog.Builder(this@MainActivity).setTitle(title)
+                .setMultiChoiceItems(labels, checked) { _, i, c -> checked[i] = c }
+                .setPositiveButton(okLabel) { _, _ ->
+                    val ids = rows.indices.filter { checked[it] }.map { rows[it].id }
+                    if (ids.isEmpty()) toast("چیزی انتخاب نشده.") else onDone(ids)
+                }
+                .setNeutralButton("همه / هیچ", null)
+                .setNegativeButton("انصراف", null).create()
+            d.show()
+            d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                val allOn = checked.all { it }
+                for (i in rows.indices) { checked[i] = !allOn; d.listView.setItemChecked(i, !allOn) }
+            }
+        }
+    }
+
+    private fun assignGroup(ids: List<Long>, g: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            ids.chunked(500).forEach { db.contactDao().setGroup(it, g) }
+            withContext(Dispatchers.Main) {
+                toast("${ids.size} مخاطب به " + (if (g.isEmpty()) "«بدون گروه»" else "گروه «$g»") + " منتقل شد.")
+                groupFilter = null
+                showTab(1)
+            }
+        }
+    }
+
+    private fun newGroupDialog() {
+        val input = styledInput("نام گروه جدید")
+        AlertDialog.Builder(this).setTitle("گروه جدید").setView(input)
+            .setPositiveButton("انتخاب مخاطبین") { _, _ ->
+                val g = input.text.toString().trim()
+                if (g.isEmpty()) toast("نام گروه را وارد کنید.")
+                else selectContacts("مخاطبین گروه «$g»", "افزودن به گروه") { ids -> assignGroup(ids, g) }
+            }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun chooseTargetGroup(onPick: (String) -> Unit) {
+        lifecycleScope.launch {
+            val groups = withContext(Dispatchers.IO) { db.contactDao().groups() }.filter { it.isNotBlank() }
+            val items = (listOf("➕  گروه جدید…", "🚫  بدون گروه") + groups).toTypedArray()
+            AlertDialog.Builder(this@MainActivity).setTitle("انتقال به").setItems(items) { _, i ->
+                when (i) {
+                    0 -> {
+                        val input = styledInput("نام گروه جدید")
+                        AlertDialog.Builder(this@MainActivity).setTitle("گروه جدید").setView(input)
+                            .setPositiveButton("تأیید") { _, _ ->
+                                val g = input.text.toString().trim()
+                                if (g.isEmpty()) toast("نام گروه را وارد کنید.") else onPick(g)
+                            }
+                            .setNegativeButton("انصراف", null).show()
+                    }
+                    1 -> onPick("")
+                    else -> onPick(groups[i - 2])
+                }
+            }.setNegativeButton("بستن", null).show()
+        }
+    }
+
+    private fun moveContactsDialog() {
+        selectContacts("انتخاب مخاطبین برای انتقال", "ادامه") { ids -> chooseTargetGroup { g -> assignGroup(ids, g) } }
+    }
+
+    private fun groupListDialog() {
+        lifecycleScope.launch {
+            val all = withContext(Dispatchers.IO) { db.contactDao().getAll() }
+            val groups = all.groupBy { it.groupName }.filterKeys { it.isNotBlank() }
+            if (groups.isEmpty()) { toast("هنوز گروهی ساخته نشده است."); return@launch }
+            val names = groups.keys.sorted()
+            val labels = names.map { "$it — ${groups[it]?.size ?: 0} مخاطب" }.toTypedArray()
+            AlertDialog.Builder(this@MainActivity).setTitle("گروه‌ها (${names.size})")
+                .setItems(labels) { _, i -> groupActionsDialog(names[i]) }
+                .setNegativeButton("بستن", null).show()
+        }
+    }
+
+    private fun groupActionsDialog(g: String) {
+        AlertDialog.Builder(this).setTitle("گروه «$g»")
+            .setItems(arrayOf(
+                "👁  مشاهده مخاطبین",
+                "✉  ارسال به این گروه",
+                "✏  تغییر نام / ادغام با گروه دیگر",
+                "🧺  حذف گروه (مخاطبین می‌مانند)",
+                "🗑  حذف گروه و مخاطبینش"
+            )) { _, i ->
+                when (i) {
+                    0 -> { groupFilter = g; showTab(1) }
+                    1 -> { presetGroup = g; showTab(2) }
+                    2 -> renameGroupDialog(g)
+                    3 -> confirm("گروه «$g» حذف شود؟ مخاطبین بدون گروه می‌شوند.") { db.contactDao().renameGroup(g, "") }
+                    else -> groupDeleteDialog(g)
+                }
+            }.setNegativeButton("بستن", null).show()
+    }
+
+    private fun groupDeleteDialog(g: String) {
+        confirm("همه مخاطبین گروه «$g» حذف شوند؟ این کار قابل بازگشت نیست.") { db.contactDao().deleteGroup(g) }
+    }
+
+    private fun renameGroupDialog(g: String) {
+        val input = styledInput("نام جدید (اگر نام یک گروه موجود باشد، ادغام می‌شوند)").apply { setText(g) }
+        AlertDialog.Builder(this).setTitle("تغییر نام «$g»").setView(input)
+            .setPositiveButton("ذخیره") { _, _ ->
+                val n = input.text.toString().trim()
+                if (n.isEmpty() || n == g) toast("نام جدید را وارد کنید.")
+                else lifecycleScope.launch(Dispatchers.IO) {
+                    db.contactDao().renameGroup(g, n)
+                    withContext(Dispatchers.Main) {
+                        if (groupFilter == g) groupFilter = n
+                        toast("انجام شد.")
+                        showTab(1)
+                    }
+                }
+            }
+            .setNegativeButton("انصراف", null).show()
     }
 
     private fun allPerms(): Array<String> {
@@ -1099,35 +1265,86 @@ class MainActivity : AppCompatActivity() {
 
     private fun contacts() {
         addTitle("مخاطبین")
-        addText("مخاطبین مجاز به دریافت پیام را مدیریت کنید.")
-        val search=EditText(this).apply {
-            hint="🔎 جستجوی نام، شماره یا گروه"
-            setBackgroundResource(R.drawable.input_bg)
-            layoutDirection=rtl
-            setPadding(dp(14),dp(10),dp(14),dp(10))
-        }
+        addText("مخاطبین را در گروه‌ها دسته‌بندی و مدیریت کنید.")
+        val search = styledInput("🔎 جستجوی نام، شماره یا گروه")
         content.addView(search, marginParams())
-        addButton("＋  افزودن مخاطب"){contactDialog(null)}
-        addButton("📥  وارد کردن مخاطبین (TXT / CSV / گوشی)"){importMenu()}
-        addButton("🛠  ابزارهای گروهی و حذف"){bulkMenu()}
-        val list=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
+        val chipScroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; layoutDirection = rtl }
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = rtl }
+        chipScroll.addView(chips)
+        content.addView(chipScroll)
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutDirection = rtl; setPadding(0, dp(6), 0, dp(2)) }
+        content.addView(actions)
+        val summary = TextView(this).apply { textSize = 13f; setTextColor(col(R.color.app_t3)); gravity = Gravity.RIGHT; setPadding(0, dp(4), 0, dp(6)) }
+        content.addView(summary)
+        addButton("＋  افزودن مخاطب") { contactDialog(null) }
+        addButton("📁  مدیریت گروه‌ها") { groupsMenu() }
+        addButton("📥  وارد کردن مخاطبین (TXT / CSV / گوشی)") { importMenu() }
+        addButton("🛠  ابزارهای گروهی و حذف") { bulkMenu() }
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(list)
-        fun load(q:String="") {
-            lifecycleScope.launch {
-                val rows=if(q.isBlank()) db.contactDao().getAll() else db.contactDao().search(q)
-                list.removeAllViews()
-                if(rows.isEmpty()) addEmpty(list,"مخاطبی پیدا نشد.")
-                rows.forEach { c ->
-                    list.addView(contactCard(c))
+        var all: List<ContactEntity> = emptyList()
+
+        fun render() {
+            val q = search.text.toString().trim()
+            val qa = toAsciiDigits(q)
+            val g = groupFilter
+            val rows = all.filter { c ->
+                (g == null || c.groupName == g) &&
+                    (q.isEmpty() || c.name.contains(q, true) || c.phone.contains(qa) || c.groupName.contains(q, true))
+            }
+            list.removeAllViews()
+            summary.text = "${rows.size} مخاطب" + (if (g == null) "" else if (g.isEmpty()) "  •  بدون گروه" else "  •  گروه «$g»")
+            if (rows.isEmpty()) addEmpty(list, "مخاطبی پیدا نشد.")
+            rows.take(300).forEach { list.addView(contactCard(it)) }
+            if (rows.size > 300) {
+                list.addView(TextView(this).apply {
+                    text = "۳۰۰ مورد اول نمایش داده شد؛ برای دیدن بقیه جستجو یا گروه را محدود کنید."
+                    textSize = 13f; gravity = Gravity.CENTER; setTextColor(col(R.color.app_t4)); setPadding(0, dp(10), 0, dp(10))
+                })
+            }
+        }
+
+        fun buildChips() {
+            val groups = all.groupBy { it.groupName }
+            val gf = groupFilter
+            if (gf != null && gf.isNotEmpty() && !groups.containsKey(gf)) groupFilter = null
+            val sel = groupFilter
+            chips.removeAllViews()
+            fun addChip(label: String, value: String?) {
+                chips.addView(
+                    chip(label, sel == value) { groupFilter = value; buildChips(); render() },
+                    LinearLayout.LayoutParams(-2, -2).apply { setMargins(dp(3), 0, dp(3), 0) }
+                )
+            }
+            addChip("همه (${all.size})", null)
+            val none = groups[""]?.size ?: 0
+            if (none > 0) addChip("بدون گروه ($none)", "")
+            groups.keys.filter { it.isNotBlank() }.sorted().forEach { addChip("$it (${groups[it]?.size ?: 0})", it) }
+            actions.removeAllViews()
+            if (sel != null && sel.isNotBlank()) {
+                listOf<Pair<String, () -> Unit>>(
+                    "✉ ارسال به این گروه" to { presetGroup = sel; showTab(2) },
+                    "✏ تغییر نام" to { renameGroupDialog(sel) },
+                    "🗑 حذف گروه" to { groupDeleteDialog(sel) }
+                ).forEach { (t, a) ->
+                    actions.addView(TextView(this).apply {
+                        text = t; textSize = 13f; setTextColor(BLUE)
+                        setPadding(dp(6), dp(4), dp(10), dp(4)); setOnClickListener { a() }
+                    })
                 }
             }
         }
-        search.addTextChangedListener(object:android.text.TextWatcher{
-            override fun beforeTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){}
-            override fun onTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){load(s?.toString()?:"")}
-            override fun afterTextChanged(e:android.text.Editable?){}
+
+        search.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) { render() }
+            override fun afterTextChanged(e: android.text.Editable?) {}
         })
-        load()
+        lifecycleScope.launch {
+            all = withContext(Dispatchers.IO) { db.contactDao().getAll() }
+            buildChips()
+            render()
+        }
     }
 
     private fun toAsciiDigits(t: String): String {
@@ -1203,7 +1420,7 @@ class MainActivity : AppCompatActivity() {
         val name=EditText(this).apply{hint="نام و نام خانوادگی";setText(existing?.name?:"");setBackgroundResource(R.drawable.input_bg)}
         val phone=EditText(this).apply{hint="شماره موبایل";setText(existing?.phone?:"");setBackgroundResource(R.drawable.input_bg)}
         val group=EditText(this).apply{hint="گروه";setText(existing?.groupName?:"");setBackgroundResource(R.drawable.input_bg)}
-        box.addView(name,marginParams());box.addView(phone,marginParams());box.addView(group,marginParams())
+        box.addView(name,marginParams());box.addView(phone,marginParams());box.addView(group,marginParams());box.addView(groupLink(group))
         AlertDialog.Builder(this).setTitle(if(existing==null)"افزودن مخاطب" else "ویرایش مخاطب").setView(box)
             .setPositiveButton("ذخیره"){_,_->
                 val p=phone.text.toString().trim()
@@ -1224,10 +1441,10 @@ class MainActivity : AppCompatActivity() {
     private fun sending() {
         addTitle("ارسال پیامک")
         addText("پیام خود را آماده کنید و قبل از ارسال تعداد گیرندگان را بررسی کنید.")
-        val group=styledInput("گروه — خالی یعنی همه")
+        val group=styledInput("گروه — خالی یعنی همه").apply{setText(presetGroup);presetGroup=""}
         val message=styledInput("متن پیام",5)
         val interval=styledInput("فاصله بین پیام‌ها به ثانیه").apply{setText(getSharedPreferences("settings",Context.MODE_PRIVATE).getInt("interval",3).toString())}
-        content.addView(group);content.addView(message)
+        content.addView(group);content.addView(groupLink(group));content.addView(message)
         val counter=TextView(this).apply{textSize=12f;gravity=Gravity.RIGHT;setTextColor(col(R.color.app_t4));text="0 کاراکتر"}
         content.addView(counter)
         val optTxt=android.widget.CheckBox(this).apply{text="افزودن «لغو۱۱» به انتهای پیام (مخاطب با پاسخ لغو۱۱ حذف می‌شود)";layoutDirection=rtl;textSize=13f}
@@ -1370,7 +1587,7 @@ class MainActivity : AppCompatActivity() {
         val msg=styledInput("متن پیام",4)
         val interval=styledInput("فاصله بین پیام‌ها به ثانیه").apply{setText("3")}
         val rep=android.widget.Spinner(this).apply{adapter=android.widget.ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,arrayOf("بدون تکرار","تکرار روزانه","تکرار هفتگی","تکرار ماهانه"));layoutDirection=rtl}
-        box.addView(group);box.addView(msg);box.addView(interval);box.addView(rep)
+        box.addView(group);box.addView(groupLink(group));box.addView(msg);box.addView(interval);box.addView(rep)
         AlertDialog.Builder(this).setTitle("زمان‌بندی پیامک").setView(box)
             .setPositiveButton("انتخاب تاریخ و ساعت"){_,_->pickDateTime(group.text.toString(),msg.text.toString(),interval.text.toString().toIntOrNull()?:3,arrayOf("NONE","DAILY","WEEKLY","MONTHLY")[rep.selectedItemPosition])}
             .setNegativeButton("انصراف",null).show()
@@ -1475,9 +1692,17 @@ class MainActivity : AppCompatActivity() {
         addText("حداکثر تأخیر تصادفی اضافه بین پیام‌ها (ثانیه)")
         val jit=styledInput("مثلاً 3").apply{inputType=android.text.InputType.TYPE_CLASS_NUMBER;setText(sp.getInt("jitter",3).toString())}
         content.addView(jit,marginParams())
+        addText("ساعت مجاز ارسال: از ساعت (۰ تا ۲۳)")
+        val hf=styledInput("مثلاً 8").apply{inputType=android.text.InputType.TYPE_CLASS_NUMBER;setText(sp.getInt("hour_from",0).toString())}
+        content.addView(hf,marginParams())
+        addText("تا ساعت (۱ تا ۲۴) — از ۰ تا ۲۴ یعنی همیشه")
+        val ht=styledInput("مثلاً 21").apply{inputType=android.text.InputType.TYPE_CLASS_NUMBER;setText(sp.getInt("hour_to",24).toString())}
+        content.addView(ht,marginParams())
         addButton("💾  ذخیره محدودیت‌ها"){
             sp.edit().putInt("daily_limit",toAsciiDigits(lim.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:200)
-                .putInt("jitter",toAsciiDigits(jit.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:3).apply()
+                .putInt("jitter",toAsciiDigits(jit.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:3)
+                .putInt("hour_from",toAsciiDigits(hf.text.toString()).toIntOrNull()?.coerceIn(0,23)?:0)
+                .putInt("hour_to",toAsciiDigits(ht.text.toString()).toIntOrNull()?.coerceIn(1,24)?:24).apply()
             toast("ذخیره شد.")
         }
         addButton("🌐  ارسال از طریق API / پنل پیامک"){apiMenu()}
