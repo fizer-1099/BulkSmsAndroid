@@ -716,7 +716,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this).setTitle("بررسی همین حالا")
             .setMessage("مناسبت‌ها و تولدهای «امروز» الان بررسی و ارسال می‌شوند. اگر امروز قبلاً ارسال شده باشد، دوباره برای همان افراد ارسال می‌شود. ادامه می‌دهید؟")
             .setPositiveButton("ارسال") { _, _ ->
-                if (!hasSmsPerm()) toast("ابتدا مجوز ارسال پیامک را بدهید.")
+                if (!hasSmsPerm() && !ApiSender.isApiMode(this)) toast("ابتدا مجوز ارسال پیامک را بدهید.")
                 else {
                     WorkManager.getInstance(this).enqueue(
                         OneTimeWorkRequestBuilder<OccasionWorker>().setInputData(workDataOf("force" to true)).build()
@@ -733,6 +733,120 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("متوجه شدم", null).show()
     }
 
+    // ---------- external SMS API / panel ----------
+    private fun apiMenu() {
+        val mode = if (ApiSender.isApiMode(this)) "API / پنل پیامک" else "سیم‌کارت گوشی"
+        AlertDialog.Builder(this).setTitle("ارسال از طریق API / پنل")
+            .setItems(arrayOf(
+                "روش ارسال فعلی: $mode (تغییر)",
+                "⚙  تنظیمات اتصال API",
+                "📋  قالب پیشنهادی (کاوه‌نگار)",
+                "🧪  ارسال آزمایشی",
+                "ℹ  راهنما"
+            )) { _, i ->
+                when (i) {
+                    0 -> apiModeDialog()
+                    1 -> apiConfigDialog()
+                    2 -> { applyKavenegarPreset(); apiConfigDialog() }
+                    3 -> apiTestDialog()
+                    else -> apiHelp()
+                }
+            }.setNegativeButton("بستن", null).show()
+    }
+
+    private fun apiModeDialog() {
+        AlertDialog.Builder(this).setTitle("روش ارسال")
+            .setSingleChoiceItems(arrayOf("سیم‌کارت گوشی", "API / پنل پیامک"), if (ApiSender.isApiMode(this)) 1 else 0) { d, i ->
+                if (i == 1 && ApiSender.prefs(this).getString("url", "").isNullOrBlank()) {
+                    toast("ابتدا تنظیمات اتصال API را وارد کنید.")
+                } else {
+                    ApiSender.prefs(this).edit().putString("mode", if (i == 1) "API" else "SIM").apply()
+                    toast(if (i == 1) "ارسال از طریق API فعال شد." else "ارسال از طریق سیم‌کارت فعال شد.")
+                }
+                d.dismiss()
+            }.show()
+    }
+
+    private fun applyKavenegarPreset() {
+        ApiSender.prefs(this).edit()
+            .putString("url", "https://api.kavenegar.com/v1/API_KEY_HERE/sms/send.json?receptor={phone}&sender={sender}&message={message}")
+            .putString("method", "GET")
+            .putString("body_type", "RAW")
+            .putString("headers", "")
+            .putString("body", "")
+            .putString("success", "\"status\":200")
+            .apply()
+        toast("قالب اعمال شد؛ API_KEY_HERE را با کلید خودتان عوض کنید.")
+    }
+
+    private fun apiConfigDialog() {
+        val sp = ApiSender.prefs(this)
+        val types = listOf("JSON", "FORM", "RAW")
+        val url = styledInput("آدرس API (فقط https)").apply { setText(sp.getString("url", "")) }
+        val method = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, arrayOf("GET", "POST"))
+            setSelection(if (sp.getString("method", "POST") == "GET") 0 else 1)
+        }
+        val bodyType = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, arrayOf("JSON", "FORM", "RAW"))
+            setSelection(types.indexOf(sp.getString("body_type", "JSON")).coerceAtLeast(0))
+        }
+        val headers = styledInput("هدرها (هر خط: Name: value)", 3).apply { setText(sp.getString("headers", "")) }
+        val body = styledInput("قالب بدنه (برای POST)", 4).apply { setText(sp.getString("body", "")) }
+        val sender = styledInput("شماره / خط ارسال‌کننده ({sender})").apply { setText(sp.getString("sender", "")) }
+        val success = styledInput("کلمه موفقیت در پاسخ (اختیاری، چند مورد با |)").apply { setText(sp.getString("success", "")) }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = rtl
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        box.addView(TextView(this).apply {
+            text = "متغیرها: {phone} = 0913…   {phone98} = 98913…   {phoneplus98} = +98913…   {message}   {sender}"
+            textSize = 12f
+            setTextColor(col(R.color.app_t4))
+        })
+        listOf<View>(url, method, bodyType, headers, body, sender, success).forEach { box.addView(it, marginParams()) }
+        AlertDialog.Builder(this).setTitle("تنظیمات اتصال API")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("ذخیره") { _, _ ->
+                sp.edit()
+                    .putString("url", url.text.toString().trim())
+                    .putString("method", method.selectedItem.toString())
+                    .putString("body_type", bodyType.selectedItem.toString())
+                    .putString("headers", headers.text.toString())
+                    .putString("body", body.text.toString())
+                    .putString("sender", sender.text.toString().trim())
+                    .putString("success", success.text.toString().trim())
+                    .apply()
+                toast("ذخیره شد. برای فعال‌سازی، «روش ارسال» را روی API بگذارید.")
+            }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun apiTestDialog() {
+        val input = styledInput("شماره موبایل برای تست").apply { inputType = android.text.InputType.TYPE_CLASS_PHONE }
+        AlertDialog.Builder(this).setTitle("ارسال آزمایشی با API").setView(input)
+            .setPositiveButton("ارسال") { _, _ ->
+                val num = input.text.toString().trim()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val (ok, info) = ApiSender.send(this@MainActivity, num, "پیام آزمایشی از برنامه")
+                    withContext(Dispatchers.Main) {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle(if (ok) "✅ موفق" else "❌ ناموفق")
+                            .setMessage(info)
+                            .setPositiveButton("باشه", null).show()
+                    }
+                }
+            }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun apiHelp() {
+        AlertDialog.Builder(this).setTitle("راهنمای API")
+            .setMessage("۱) مستندات «ارسال تکی پیامک» پنل خود را باز کنید و آدرس، روش (GET/POST) و پارامترها را در «تنظیمات اتصال» بنویسید.\n\n۲) به‌جای شماره و متن از متغیرها استفاده کنید: {phone} {phone98} {phoneplus98} {message} {sender}. مقدارها خودکار برای نوع بدنه (JSON، FORM یا آدرس) امن‌سازی می‌شوند.\n\n۳) مثال JSON:\n{\"to\":\"{phone}\",\"text\":\"{message}\"}\nهدر: Authorization: Bearer توکن\n\n۴) «کلمه موفقیت» را از پاسخ موفق پنل بردارید تا خطاهای پنهان (مثل اعتبار کم) هم ناموفق ثبت شوند.\n\n۵) بعد از «ارسال آزمایشی»، روش ارسال را روی API بگذارید. وضعیت «تحویل‌شده» برای API ثبت نمی‌شود، فقط «ارسال‌شده».\n\nکلید API روی همین گوشی ذخیره می‌شود و داخل فایل پشتیبان نیست.")
+            .setPositiveButton("متوجه شدم", null).show()
+    }
+
     private fun allPerms(): Array<String> {
         val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE, android.Manifest.permission.RECEIVE_SMS)
         if (android.os.Build.VERSION.SDK_INT >= 33) l.add("android.permission.POST_NOTIFICATIONS")
@@ -742,7 +856,7 @@ class MainActivity : AppCompatActivity() {
     private var pollJob: kotlinx.coroutines.Job? = null
 
     private fun launchService() {
-        if (!hasSmsPerm()) { toast("ابتدا مجوز ارسال پیامک را بدهید."); return }
+        if (!hasSmsPerm() && !ApiSender.isApiMode(this)) { toast("ابتدا مجوز ارسال پیامک را بدهید."); return }
         androidx.core.content.ContextCompat.startForegroundService(
             this, Intent(this, SendService::class.java).setAction(SendService.ACTION_START)
         )
@@ -1152,7 +1266,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun confirmSend(group:String,text:String,interval:Int) {
-        if(!hasSmsPerm()){
+        if(!hasSmsPerm() && !ApiSender.isApiMode(this)){
             permLauncher.launch(arrayOf(android.Manifest.permission.SEND_SMS,android.Manifest.permission.READ_PHONE_STATE))
             AlertDialog.Builder(this).setTitle("مجوز ارسال پیامک")
                 .setMessage("برای ارسال، مجوز «ارسال پیامک» باید روی «اجازه دادن» باشد. تنظیمات برنامه را باز کنید.")
@@ -1165,7 +1279,7 @@ class MainActivity : AppCompatActivity() {
             withContext(Dispatchers.Main) {
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("تأیید ارسال")
-                    .setMessage("گیرندگان مجاز: ${contacts.size}\nفاصله: $interval ثانیه\n\nارسال شروع شود؟")
+                    .setMessage("گیرندگان مجاز: ${contacts.size}\nروش ارسال: ${if(ApiSender.isApiMode(this@MainActivity))"API / پنل پیامک" else "سیم‌کارت"}\nفاصله: $interval ثانیه\n\nارسال شروع شود؟")
                     .setPositiveButton("شروع"){_,_->startCampaign(contacts,text,group,interval)}
                     .setNegativeButton("انصراف",null).show()
             }
@@ -1366,6 +1480,7 @@ class MainActivity : AppCompatActivity() {
                 .putInt("jitter",toAsciiDigits(jit.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:3).apply()
             toast("ذخیره شد.")
         }
+        addButton("🌐  ارسال از طریق API / پنل پیامک"){apiMenu()}
         addButton("🎂  مناسبت‌ها و تولد"){occasionsMenu()}
         addButton("🌓  حالت نمایش (روشن / تیره / خودکار)"){themeDialog()}
         addButton("🔒  رمز و قفل برنامه"){lockSettings()}

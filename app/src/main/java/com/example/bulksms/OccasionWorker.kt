@@ -40,7 +40,7 @@ class OccasionWorker(
             now.get(Calendar.YEAR), now.get(Calendar.MONTH) + 1, now.get(Calendar.DAY_OF_MONTH)
         )
         if (!force && sp.getString("last_run", "") == todayKey) return Result.success()
-        if (ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+        if (!ApiSender.isApiMode(ctx) && ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             return Result.success()
         }
 
@@ -83,9 +83,14 @@ class OccasionWorker(
             val text = template.replace("{نام}", c.name.ifBlank { "دوست عزیز" })
             if (!seen.add("$num|$text")) continue
             try {
-                val parts = sms.divideMessage(text)
-                if (parts.size > 1) sms.sendMultipartTextMessage(num, null, parts, null, null)
-                else sms.sendTextMessage(num, null, text, null, null)
+                if (ApiSender.isApiMode(applicationContext)) {
+                    val r = ApiSender.send(applicationContext, num, text)
+                    if (!r.first) throw Exception(r.second)
+                } else {
+                    val parts = sms.divideMessage(text)
+                    if (parts.size > 1) sms.sendMultipartTextMessage(num, null, parts, null, null)
+                    else sms.sendTextMessage(num, null, text, null, null)
+                }
                 db.sendLogDao().insert(SendLogEntity(phone = num, message = text, groupName = group, status = Status.SENT))
             } catch (e: Exception) {
                 db.sendLogDao().insert(

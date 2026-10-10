@@ -49,9 +49,14 @@ class ScheduledSmsWorker(
                 val num = PhoneUtil.normalize(contact.phone)
                 val text = message.replace("{نام}", contact.name.ifBlank { "دوست عزیز" })
                 try {
-                    val parts = sms.divideMessage(text)
-                    if (parts.size > 1) sms.sendMultipartTextMessage(num, null, parts, null, null)
-                    else sms.sendTextMessage(num, null, text, null, null)
+                    if (ApiSender.isApiMode(applicationContext)) {
+                        val r = ApiSender.send(applicationContext, num, text)
+                        if (!r.first) throw Exception(r.second)
+                    } else {
+                        val parts = sms.divideMessage(text)
+                        if (parts.size > 1) sms.sendMultipartTextMessage(num, null, parts, null, null)
+                        else sms.sendTextMessage(num, null, text, null, null)
+                    }
                     db.sendLogDao().insert(
                         SendLogEntity(phone = num, message = text, groupName = group, status = Status.SENT)
                     )

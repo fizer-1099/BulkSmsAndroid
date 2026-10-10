@@ -120,6 +120,11 @@ class SendService : Service() {
         val logId = db.sendLogDao().insert(
             SendLogEntity(phone = num, message = item.message, groupName = item.groupName, status = Status.SENDING)
         )
+        if (ApiSender.isApiMode(applicationContext)) {
+            val r = ApiSender.send(applicationContext, num, item.message)
+            db.sendLogDao().setStatus(logId, if (r.first) Status.SENT else Status.FAIL + ": " + r.second)
+            return
+        }
         try {
             val sms = smsManager(item.subscriptionId)
             val parts = sms.divideMessage(item.message)
