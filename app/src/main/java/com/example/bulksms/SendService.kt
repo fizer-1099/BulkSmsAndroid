@@ -96,6 +96,10 @@ class SendService : Service() {
                 finalText = "✅ ارسال تمام شد: $done پیام"
                 break
             }
+            if (ExtraDb.get(applicationContext).isBlocked(item.phone)) {
+                db.queueDao().setState(item.id, "DONE")
+                continue
+            }
             val limit = prefs.getInt("daily_limit", 200)
             if (limit > 0 && db.sendLogDao().countSince(startOfDay()) >= limit) {
                 finalText = "سقف ارسال روزانه ($limit) پر شد. ارسال متوقف شد؛ بعداً از تب «ارسال» ادامه دهید."
@@ -108,7 +112,18 @@ class SendService : Service() {
                 finalText = "خارج از ساعت مجاز ارسال ($hf تا $ht). بعداً از تب «ارسال» ادامه دهید."
                 break
             }
-            sendOne(db, item)
+            var useSub = item.subscriptionId
+            val rotate = !ApiSender.isApiMode(applicationContext) && prefs.getString("sim_mode", "SINGLE") == "ROTATE"
+            if (rotate) {
+                val pick = SimRotation.pick(applicationContext)
+                if (pick == null) {
+                    finalText = "همه سیم‌کارت‌ها به سقف روزانه رسیدند (یا سیم‌کارتی پیدا نشد). بعداً ادامه دهید."
+                    break
+                }
+                useSub = pick
+            }
+            sendOne(db, item, useSub)
+            if (rotate) SimRotation.count(applicationContext, useSub)
             db.queueDao().setState(item.id, "DONE")
             val left = db.queueDao().pendingCount()
             val done = db.queueDao().doneCount()
@@ -122,7 +137,7 @@ class SendService : Service() {
         }
     }
 
-    private suspend fun sendOne(db: AppDatabase, item: QueueItemEntity) {
+    private suspend fun sendOne(db: AppDatabase, item: QueueItemEntity, subId: Int = item.subscriptionId) {
         val num = PhoneUtil.normalize(item.phone)
         val logId = db.sendLogDao().insert(
             SendLogEntity(phone = num, message = item.message, groupName = item.groupName, status = Status.SENDING)
@@ -137,7 +152,7 @@ class SendService : Service() {
             return
         }
         try {
-            val sms = smsManager(item.subscriptionId)
+            val sms = smsManager(subId)
             val parts = sms.divideMessage(item.message)
             if (parts.size > 1) {
                 val sentList = ArrayList<PendingIntent>()

@@ -5,7 +5,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-class ExtraDb private constructor(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "extras.db", null, 1) {
+class ExtraDb private constructor(ctx: Context) : SQLiteOpenHelper(ctx.applicationContext, "extras.db", null, 2) {
 
     data class Campaign(val id: Long, val name: String, val created: Long, val total: Int, val group: String, val message: String)
 
@@ -13,9 +13,16 @@ class ExtraDb private constructor(ctx: Context) : SQLiteOpenHelper(ctx.applicati
         db.execSQL("CREATE TABLE campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created INTEGER NOT NULL, total INTEGER NOT NULL, grp TEXT NOT NULL, message TEXT NOT NULL)")
         db.execSQL("CREATE TABLE campaign_logs (campaign_id INTEGER NOT NULL, log_id INTEGER NOT NULL, PRIMARY KEY (campaign_id, log_id))")
         db.execSQL("CREATE TABLE contact_fields (phone TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY (phone, k))")
+        db.execSQL("CREATE TABLE IF NOT EXISTS blacklist (phone TEXT PRIMARY KEY NOT NULL, added INTEGER NOT NULL)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS consent (phone TEXT PRIMARY KEY NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL)")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("CREATE TABLE IF NOT EXISTS blacklist (phone TEXT PRIMARY KEY NOT NULL, added INTEGER NOT NULL)")
+            db.execSQL("CREATE TABLE IF NOT EXISTS consent (phone TEXT PRIMARY KEY NOT NULL, ts INTEGER NOT NULL, source TEXT NOT NULL)")
+        }
+    }
 
     companion object {
         @Volatile private var inst: ExtraDb? = null
@@ -97,6 +104,55 @@ class ExtraDb private constructor(ctx: Context) : SQLiteOpenHelper(ctx.applicati
             while (c.moveToNext()) {
                 out.getOrPut(c.getString(0)) { LinkedHashMap() }[c.getString(1)] = c.getString(2)
             }
+        }
+        return out
+    }
+
+    // ----- blacklist -----
+    fun addBlacklist(phone: String) {
+        val cv = ContentValues().apply { put("phone", phone); put("added", System.currentTimeMillis()) }
+        writableDatabase.insertWithOnConflict("blacklist", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+
+    fun removeBlacklist(phone: String) {
+        writableDatabase.delete("blacklist", "phone = ?", arrayOf(phone))
+    }
+
+    fun clearBlacklist() {
+        writableDatabase.delete("blacklist", null, null)
+    }
+
+    fun blacklist(): List<String> {
+        val out = ArrayList<String>()
+        readableDatabase.rawQuery("SELECT phone FROM blacklist ORDER BY phone", null).use { c ->
+            while (c.moveToNext()) out.add(c.getString(0))
+        }
+        return out
+    }
+
+    fun blacklistSet(): Set<String> = blacklist().toHashSet()
+
+    fun isBlocked(phone: String): Boolean {
+        val key = PhoneUtil.toIranMobile(phone) ?: PhoneUtil.normalize(phone)
+        readableDatabase.rawQuery("SELECT 1 FROM blacklist WHERE phone = ? LIMIT 1", arrayOf(key)).use { c ->
+            return c.moveToFirst()
+        }
+    }
+
+    // ----- consent -----
+    fun setConsent(phone: String, ts: Long, source: String) {
+        val cv = ContentValues().apply { put("phone", phone); put("ts", ts); put("source", source) }
+        writableDatabase.insertWithOnConflict("consent", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun removeConsent(phone: String) {
+        writableDatabase.delete("consent", "phone = ?", arrayOf(phone))
+    }
+
+    fun allConsents(): Map<String, Pair<Long, String>> {
+        val out = HashMap<String, Pair<Long, String>>()
+        readableDatabase.rawQuery("SELECT phone, ts, source FROM consent", null).use { c ->
+            while (c.moveToNext()) out[c.getString(0)] = Pair(c.getLong(1), c.getString(2))
         }
         return out
     }

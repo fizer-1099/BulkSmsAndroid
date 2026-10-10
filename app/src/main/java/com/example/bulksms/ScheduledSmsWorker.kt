@@ -42,7 +42,7 @@ class ScheduledSmsWorker(
         if (sched != null && sched.status == "CANCELLED") return Result.success()
 
         return try {
-            val contacts = db.contactDao().eligible(group)
+            val contacts = db.contactDao().eligible(group).filter { !ExtraDb.get(applicationContext).isBlocked(it.phone) }
             val sms = smsManager(subscriptionId)
 
             for ((index, contact) in contacts.withIndex()) {

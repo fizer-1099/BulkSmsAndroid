@@ -1168,6 +1168,231 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------- SIM rotation ----------
+    private fun simModeDialog() {
+        val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val cur = if (sp.getString("sim_mode", "SINGLE") == "ROTATE") 1 else 0
+        AlertDialog.Builder(this).setTitle("حالت سیم‌کارت")
+            .setSingleChoiceItems(arrayOf("تک‌سیم (سیم‌کارت انتخاب‌شده در تب ارسال)", "چرخشی بین همه سیم‌کارت‌های فعال"), cur) { d, i ->
+                if (i == 1 && SimRotation.activeSubIds(this).size < 2) {
+                    toast("برای حالت چرخشی دو سیم‌کارت فعال و مجوز وضعیت گوشی لازم است.")
+                } else {
+                    sp.edit().putString("sim_mode", if (i == 1) "ROTATE" else "SINGLE").apply()
+                    toast("ذخیره شد.")
+                }
+                d.dismiss()
+            }
+            .setNeutralButton("آمار امروز") { _, _ ->
+                AlertDialog.Builder(this).setTitle("ارسال امروز به تفکیک سیم‌کارت")
+                    .setMessage(SimRotation.status(this)).setPositiveButton("باشه", null).show()
+            }
+            .setNegativeButton("بستن", null).show()
+    }
+
+    // ---------- blacklist & consent ----------
+    private val blacklistFileLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) importBlacklistFile(uri) }
+    private val consentExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri -> if (uri != null) writeConsentCsv(uri) }
+    private val consentSources = arrayOf("فرم ثبت‌نام سایت", "حضوری", "تماس تلفنی", "پیامک تأیید", "مشتری قبلی")
+
+    private fun keyOfPhone(p: String): String = PhoneUtil.toIranMobile(p) ?: PhoneUtil.normalize(p)
+
+    private fun parsePhones(text: String): Pair<List<String>, Int> {
+        val tokens = text.split(Regex("[\\r\\n,;،؛\\s]+")).map { it.trim() }.filter { it.isNotEmpty() }
+        val ok = tokens.mapNotNull { parseIranPhone(it) }
+        return Pair(ok.distinct(), tokens.size - ok.size)
+    }
+
+    private fun safetyMenu() {
+        AlertDialog.Builder(this).setTitle("لیست سیاه و رضایت‌ها")
+            .setItems(arrayOf(
+                "⛔  افزودن شماره به لیست سیاه",
+                "📄  لیست سیاه از فایل TXT",
+                "📋  مشاهده / حذف لیست سیاه",
+                "✅  ثبت رضایت برای یک گروه",
+                "✅  ثبت رضایت برای مخاطبین انتخاب‌شده",
+                "📑  گزارش رضایت‌ها (CSV)",
+                "ℹ  راهنما"
+            )) { _, i ->
+                when (i) {
+                    0 -> blacklistAddDialog()
+                    1 -> blacklistFileLauncher.launch(arrayOf("*/*"))
+                    2 -> blacklistListDialog()
+                    3 -> pickGroup { g -> askConsentSource { src -> consentForGroup(g, src) } }
+                    4 -> selectContacts("انتخاب مخاطبین برای ثبت رضایت", "ادامه") { ids -> askConsentSource { src -> consentForIds(ids, src) } }
+                    5 -> consentExportLauncher.launch("گزارش_رضایت.csv")
+                    else -> AlertDialog.Builder(this).setTitle("راهنما")
+                        .setMessage("• لیست سیاه: شماره‌هایی که هیچ‌وقت نباید پیام بگیرند؛ در همه ارسال‌ها (کمپین، زمان‌بندی، تولد و مناسبت) خودکار کنار گذاشته می‌شوند.\n• رضایت: تاریخ و منبع اجازه دریافت پیام را ثبت کنید. با تیک «ارسال فقط به مخاطبین دارای رضایت» در تب ارسال، فقط به همین افراد پیام می‌رود.\n• «گزارش رضایت‌ها» برای نگهداری مستندات رضایت است.")
+                        .setPositiveButton("متوجه شدم", null).show()
+                }
+            }.setNegativeButton("بستن", null).show()
+    }
+
+    private fun blacklistAddDialog() {
+        val input = styledInput("هر شماره در یک خط (یا با ویرگول جدا کنید)", 6)
+        AlertDialog.Builder(this).setTitle("افزودن به لیست سیاه").setView(input)
+            .setPositiveButton("افزودن") { _, _ -> addToBlacklist(input.text.toString()) }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun addToBlacklist(text: String) {
+        val (phones, bad) = parsePhones(text)
+        if (phones.isEmpty()) { toast("شماره معتبری پیدا نشد."); return }
+        lifecycleScope.launch(Dispatchers.IO) {
+            val ex = ExtraDb.get(this@MainActivity)
+            phones.forEach { ex.addBlacklist(it) }
+            withContext(Dispatchers.Main) { toast("${phones.size} شماره به لیست سیاه اضافه شد" + (if (bad > 0) " ($bad مورد نامعتبر)" else "") + ".") }
+        }
+    }
+
+    private fun importBlacklistFile(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val text = contentResolver.openInputStream(uri)?.use { String(it.readBytes(), Charsets.UTF_8) }?.removePrefix("\uFEFF") ?: ""
+                withContext(Dispatchers.Main) { addToBlacklist(text) }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { toast("خطا در خواندن فایل: ${e.message}") }
+            }
+        }
+    }
+
+    private fun blacklistListDialog() {
+        lifecycleScope.launch {
+            val ex = ExtraDb.get(this@MainActivity)
+            val list = withContext(Dispatchers.IO) { ex.blacklist() }
+            if (list.isEmpty()) { toast("لیست سیاه خالی است."); return@launch }
+            AlertDialog.Builder(this@MainActivity).setTitle("لیست سیاه (${list.size})")
+                .setItems(list.toTypedArray()) { _, i ->
+                    AlertDialog.Builder(this@MainActivity).setMessage("«${list[i]}» از لیست سیاه حذف شود؟")
+                        .setPositiveButton("حذف") { _, _ ->
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                ex.removeBlacklist(list[i])
+                                withContext(Dispatchers.Main) { toast("حذف شد.") }
+                            }
+                        }
+                        .setNegativeButton("انصراف", null).show()
+                }
+                .setNeutralButton("حذف همه") { _, _ ->
+                    AlertDialog.Builder(this@MainActivity).setMessage("کل لیست سیاه پاک شود؟")
+                        .setPositiveButton("بله") { _, _ ->
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                ex.clearBlacklist()
+                                withContext(Dispatchers.Main) { toast("لیست سیاه پاک شد.") }
+                            }
+                        }
+                        .setNegativeButton("انصراف", null).show()
+                }
+                .setNegativeButton("بستن", null).show()
+        }
+    }
+
+    private fun askConsentSource(onOk: (String) -> Unit) {
+        AlertDialog.Builder(this).setTitle("منبع رضایت")
+            .setItems(consentSources + "سایر…") { _, i ->
+                if (i < consentSources.size) onOk(consentSources[i])
+                else {
+                    val input = styledInput("منبع رضایت")
+                    AlertDialog.Builder(this).setTitle("منبع رضایت").setView(input)
+                        .setPositiveButton("ثبت") { _, _ ->
+                            val t = input.text.toString().trim()
+                            if (t.isNotEmpty()) onOk(t) else toast("منبع را وارد کنید.")
+                        }
+                        .setNegativeButton("انصراف", null).show()
+                }
+            }.setNegativeButton("انصراف", null).show()
+    }
+
+    private fun saveConsent(phones: List<String>, source: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val ex = ExtraDb.get(this@MainActivity)
+            val now = System.currentTimeMillis()
+            phones.forEach { ex.setConsent(keyOfPhone(it), now, source) }
+            withContext(Dispatchers.Main) { toast("رضایت ${phones.size} مخاطب ثبت شد."); showTab(1) }
+        }
+    }
+
+    private fun consentForGroup(g: String, src: String) {
+        lifecycleScope.launch {
+            val phones = withContext(Dispatchers.IO) { db.contactDao().getAll().filter { it.groupName == g }.map { it.phone } }
+            if (phones.isEmpty()) toast("این گروه مخاطبی ندارد.") else saveConsent(phones, src)
+        }
+    }
+
+    private fun consentForIds(ids: List<Long>, src: String) {
+        lifecycleScope.launch {
+            val set = ids.toHashSet()
+            val phones = withContext(Dispatchers.IO) { db.contactDao().getAll().filter { it.id in set }.map { it.phone } }
+            saveConsent(phones, src)
+        }
+    }
+
+    private fun writeConsentCsv(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val ex = ExtraDb.get(this@MainActivity)
+                val cons = ex.allConsents()
+                val bl = ex.blacklistSet()
+                val sb = StringBuilder("\uFEFFname,phone,group,consent_date,consent_source,blacklisted,opted_out\n")
+                fun q(v: String) = "\"" + v.replace("\"", "\"\"") + "\""
+                for (c in db.contactDao().getAll()) {
+                    val k = keyOfPhone(c.phone)
+                    val cs = cons[k]
+                    sb.append(q(c.name)).append(',').append(q(c.phone)).append(',').append(q(c.groupName)).append(',')
+                        .append(q(if (cs == null) "" else fmtJalali(cs.first, false))).append(',')
+                        .append(q(cs?.second ?: "")).append(',')
+                        .append(if (k in bl) "yes" else "no").append(',')
+                        .append(if (c.optedOut) "yes" else "no").append('\n')
+                }
+                contentResolver.openOutputStream(uri)?.use { it.write(sb.toString().toByteArray(Charsets.UTF_8)) }
+                withContext(Dispatchers.Main) { toast("گزارش رضایت‌ها ذخیره شد.") }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { toast("خطا: ${e.message}") }
+            }
+        }
+    }
+
+    private fun consentLink(phone: EditText): TextView = TextView(this).apply {
+        text = "✅  رضایت و لیست سیاه"
+        textSize = 13f
+        setTextColor(BLUE)
+        gravity = Gravity.RIGHT
+        setPadding(dp(4), dp(2), dp(4), dp(8))
+        setOnClickListener { consentDialog(phone.text.toString()) }
+    }
+
+    private fun consentDialog(phoneRaw: String) {
+        val k = PhoneUtil.toIranMobile(phoneRaw)
+        if (k == null) { toast("ابتدا شماره معتبر را وارد کنید."); return }
+        lifecycleScope.launch {
+            val ex = ExtraDb.get(this@MainActivity)
+            val cs = withContext(Dispatchers.IO) { ex.allConsents()[k] }
+            val blocked = withContext(Dispatchers.IO) { ex.isBlocked(k) }
+            val msg = (if (cs == null) "رضایتی ثبت نشده است." else "✅ رضایت ثبت‌شده: ${fmtJalali(cs.first, false)}\nمنبع: ${cs.second}") +
+                "\n\n" + (if (blocked) "⛔ این شماره در لیست سیاه است." else "این شماره در لیست سیاه نیست.")
+            AlertDialog.Builder(this@MainActivity).setTitle("رضایت و لیست سیاه").setMessage(msg)
+                .setPositiveButton(if (cs == null) "ثبت رضایت" else "به‌روزرسانی رضایت") { _, _ ->
+                    askConsentSource { src ->
+                        lifecycleScope.launch(Dispatchers.IO) {
+                            ex.setConsent(k, System.currentTimeMillis(), src)
+                            withContext(Dispatchers.Main) { toast("رضایت ثبت شد.") }
+                        }
+                    }
+                }
+                .setNeutralButton(if (blocked) "حذف از لیست سیاه" else "افزودن به لیست سیاه") { _, _ ->
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        if (blocked) ex.removeBlacklist(k) else ex.addBlacklist(k)
+                        withContext(Dispatchers.Main) { toast("انجام شد.") }
+                    }
+                }
+                .setNegativeButton("بستن", null).show()
+        }
+    }
+
+    private fun privacyDialog() {
+        AlertDialog.Builder(this).setTitle("حریم خصوصی و شرایط استفاده")
+            .setMessage("• اطلاعات مخاطبین، گزارش‌ها و تنظیمات فقط روی همین گوشی ذخیره می‌شود و به سرور ما ارسال نمی‌شود.\n• در حالت «API / پنل»، شماره و متن پیام به سرویس پیامکی که خودتان تنظیم کرده‌اید ارسال می‌شود و شرایط همان سرویس اعمال می‌شود.\n• مسئولیت دریافت رضایت مخاطبین و رعایت قوانین و مقررات ارسال پیامک (مثل پیام تبلیغاتی و ساعات مجاز) با شماست.\n• به مخاطبینی که لغو کرده‌اند یا در لیست سیاه هستند پیام ارسال نکنید؛ برنامه این موارد را خودکار رعایت می‌کند.\n• ارسال انبوه با سیم‌کارت شخصی ممکن است توسط اپراتور محدود شود.\n• کلید API و رمز برنامه روی گوشی ذخیره می‌شود؛ از گوشی خود محافظت کنید.\n\nاین متن راهنمای عمومی است و مشاوره حقوقی نیست.")
+            .setPositiveButton("متوجه شدم", null).show()
+    }
+
     private fun allPerms(): Array<String> {
         val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE, android.Manifest.permission.RECEIVE_SMS)
         if (android.os.Build.VERSION.SDK_INT >= 33) l.add("android.permission.POST_NOTIFICATIONS")
@@ -1449,9 +1674,12 @@ class MainActivity : AppCompatActivity() {
         addButton("📁  مدیریت گروه‌ها") { groupsMenu() }
         addButton("📥  وارد کردن مخاطبین (TXT / CSV / گوشی)") { importMenu() }
         addButton("🛠  ابزارهای گروهی و حذف") { bulkMenu() }
+        addButton("⛔  لیست سیاه و رضایت‌ها") { safetyMenu() }
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         content.addView(list)
         var all: List<ContactEntity> = emptyList()
+        var blSet: Set<String> = emptySet()
+        var consentMap: Map<String, Pair<Long, String>> = emptyMap()
 
         fun render() {
             val q = search.text.toString().trim()
@@ -1464,7 +1692,14 @@ class MainActivity : AppCompatActivity() {
             list.removeAllViews()
             summary.text = "${rows.size} مخاطب" + (if (g == null) "" else if (g.isEmpty()) "  •  بدون گروه" else "  •  گروه «$g»")
             if (rows.isEmpty()) addEmpty(list, "مخاطبی پیدا نشد.")
-            rows.take(300).forEach { list.addView(contactCard(it)) }
+            rows.take(300).forEach { c ->
+                val k = PhoneUtil.toIranMobile(c.phone) ?: PhoneUtil.normalize(c.phone)
+                val parts = ArrayList<String>()
+                if (k in blSet) parts.add("⛔ لیست سیاه")
+                val cs = consentMap[k]
+                if (cs != null) parts.add("✅ رضایت: " + fmtJalali(cs.first, false) + " (" + cs.second + ")")
+                list.addView(contactCard(c, parts.joinToString("   ")))
+            }
             if (rows.size > 300) {
                 list.addView(TextView(this).apply {
                     text = "۳۰۰ مورد اول نمایش داده شد؛ برای دیدن بقیه جستجو یا گروه را محدود کنید."
@@ -1511,6 +1746,7 @@ class MainActivity : AppCompatActivity() {
         })
         lifecycleScope.launch {
             all = withContext(Dispatchers.IO) { db.contactDao().getAll() }
+            withContext(Dispatchers.IO) { val ex = ExtraDb.get(this@MainActivity); blSet = ex.blacklistSet(); consentMap = ex.allConsents() }
             buildChips()
             render()
         }
@@ -1570,7 +1806,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun contactCard(c:ContactEntity): View {
+    private fun contactCard(c:ContactEntity, tag:String=""): View {
         val box=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
             layoutDirection=rtl
@@ -1581,6 +1817,7 @@ class MainActivity : AppCompatActivity() {
         box.addView(TextView(this).apply{text=c.name.ifBlank{"بدون نام"};textSize=17f;setTextColor(col(R.color.app_t1))})
         box.addView(TextView(this).apply{text=c.phone;textSize=14f;setTextColor(col(R.color.app_t3))})
         box.addView(TextView(this).apply{text="گروه: ${c.groupName.ifBlank{"بدون گروه"}}${if(c.optedOut) "  •  ⛔ عدم دریافت" else ""}";textSize=13f;setTextColor(if(c.optedOut)col(R.color.app_red) else col(R.color.app_t3))})
+        if(tag.isNotBlank()) box.addView(TextView(this).apply{text=tag;textSize=12f;setTextColor(col(R.color.app_t4))})
         return box
     }
 
@@ -1589,7 +1826,7 @@ class MainActivity : AppCompatActivity() {
         val name=EditText(this).apply{hint="نام و نام خانوادگی";setText(existing?.name?:"");setBackgroundResource(R.drawable.input_bg)}
         val phone=EditText(this).apply{hint="شماره موبایل";setText(existing?.phone?:"");setBackgroundResource(R.drawable.input_bg)}
         val group=EditText(this).apply{hint="گروه";setText(existing?.groupName?:"");setBackgroundResource(R.drawable.input_bg)}
-        box.addView(name,marginParams());box.addView(phone,marginParams());box.addView(group,marginParams());box.addView(groupLink(group));box.addView(fieldsLink(phone))
+        box.addView(name,marginParams());box.addView(phone,marginParams());box.addView(group,marginParams());box.addView(groupLink(group));box.addView(fieldsLink(phone));box.addView(consentLink(phone))
         AlertDialog.Builder(this).setTitle(if(existing==null)"افزودن مخاطب" else "ویرایش مخاطب").setView(box)
             .setPositiveButton("ذخیره"){_,_->
                 val p=phone.text.toString().trim()
@@ -1619,6 +1856,12 @@ class MainActivity : AppCompatActivity() {
         content.addView(counter)
         val optTxt=android.widget.CheckBox(this).apply{text="افزودن «لغو۱۱» به انتهای پیام (مخاطب با پاسخ لغو۱۱ حذف می‌شود)";layoutDirection=rtl;textSize=13f}
         content.addView(optTxt)
+        val onlyC=android.widget.CheckBox(this).apply{
+            text="ارسال فقط به مخاطبین دارای رضایت ثبت‌شده";layoutDirection=rtl;textSize=13f
+            isChecked=getSharedPreferences("settings",Context.MODE_PRIVATE).getBoolean("only_consent",false)
+            setOnCheckedChangeListener{_,v->getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putBoolean("only_consent",v).apply()}
+        }
+        content.addView(onlyC)
         message.addTextChangedListener(object:android.text.TextWatcher{
             override fun beforeTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){}
             override fun onTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){
@@ -1674,14 +1917,24 @@ class MainActivity : AppCompatActivity() {
             val contacts=db.contactDao().eligible(group)
             val fields=ExtraDb.get(this@MainActivity).allFields()
             val pat=Regex("\\{[^}]+\\}")
-            val ready=contacts.filter{ !pat.containsMatchIn(personalize(text,it,fields)) }
-            val skipped=contacts.size-ready.size
+            val extraDb=ExtraDb.get(this@MainActivity)
+            val bl=extraDb.blacklistSet()
+            val consents=extraDb.allConsents()
+            val onlyConsent=getSharedPreferences("settings",Context.MODE_PRIVATE).getBoolean("only_consent",false)
+            fun keyOf(c:ContactEntity)=PhoneUtil.toIranMobile(c.phone)?:PhoneUtil.normalize(c.phone)
+            val blocked=contacts.count{ keyOf(it) in bl }
+            val noConsent=if(onlyConsent) contacts.count{ keyOf(it) !in bl && !consents.containsKey(keyOf(it)) } else 0
+            val eligibleNow=contacts.filter{ keyOf(it) !in bl && (!onlyConsent || consents.containsKey(keyOf(it))) }
+            val ready=eligibleNow.filter{ !pat.containsMatchIn(personalize(text,it,fields)) }
+            val skipped=eligibleNow.size-ready.size
             val sample=ready.firstOrNull()?.let{ personalize(text,it,fields) }
             withContext(Dispatchers.Main) {
                 val sb=StringBuilder()
                 sb.append("گیرندگان مجاز: ${ready.size}\n")
                 sb.append("روش ارسال: ${if(ApiSender.isApiMode(this@MainActivity))"API / پنل پیامک" else "سیم‌کارت"}\n")
                 sb.append("فاصله: $interval ثانیه\n")
+                if(blocked>0) sb.append("\n⛔ $blocked مخاطب در لیست سیاه هستند و ارسال نمی‌شوند.\n")
+                if(noConsent>0) sb.append("\n📋 $noConsent مخاطب رضایت ثبت‌شده ندارند و ارسال نمی‌شوند.\n")
                 if(skipped>0) sb.append("\n⚠ $skipped مخاطب فیلد لازم برای متغیرهای پیام را ندارند و ارسال نمی‌شوند.\n")
                 if(sample!=null) sb.append("\n👁 نمونه پیام:\n$sample\n")
                 sb.append("\nارسال شروع شود؟")
@@ -1910,6 +2163,10 @@ class MainActivity : AppCompatActivity() {
         addText("حداکثر تأخیر تصادفی اضافه بین پیام‌ها (ثانیه)")
         val jit=styledInput("مثلاً 3").apply{inputType=android.text.InputType.TYPE_CLASS_NUMBER;setText(sp.getInt("jitter",3).toString())}
         content.addView(jit,marginParams())
+        addButton("📶  حالت سیم‌کارت (تک‌سیم / چرخشی)"){simModeDialog()}
+        addText("سقف روزانه هر سیم‌کارت در حالت چرخشی (۰ = نامحدود)")
+        val sl=styledInput("مثلاً 100").apply{inputType=android.text.InputType.TYPE_CLASS_NUMBER;setText(sp.getInt("sim_limit",0).toString())}
+        content.addView(sl,marginParams())
         addText("ساعت مجاز ارسال: از ساعت (۰ تا ۲۳)")
         val hf=styledInput("مثلاً 8").apply{inputType=android.text.InputType.TYPE_CLASS_NUMBER;setText(sp.getInt("hour_from",0).toString())}
         content.addView(hf,marginParams())
@@ -1920,9 +2177,11 @@ class MainActivity : AppCompatActivity() {
             sp.edit().putInt("daily_limit",toAsciiDigits(lim.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:200)
                 .putInt("jitter",toAsciiDigits(jit.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:3)
                 .putInt("hour_from",toAsciiDigits(hf.text.toString()).toIntOrNull()?.coerceIn(0,23)?:0)
-                .putInt("hour_to",toAsciiDigits(ht.text.toString()).toIntOrNull()?.coerceIn(1,24)?:24).apply()
+                .putInt("hour_to",toAsciiDigits(ht.text.toString()).toIntOrNull()?.coerceIn(1,24)?:24)
+                .putInt("sim_limit",toAsciiDigits(sl.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:0).apply()
             toast("ذخیره شد.")
         }
+        addButton("🔏  حریم خصوصی و شرایط استفاده"){privacyDialog()}
         addButton("🌐  ارسال از طریق API / پنل پیامک"){apiMenu()}
         addButton("🎂  مناسبت‌ها و تولد"){occasionsMenu()}
         addButton("🌓  حالت نمایش (روشن / تیره / خودکار)"){themeDialog()}

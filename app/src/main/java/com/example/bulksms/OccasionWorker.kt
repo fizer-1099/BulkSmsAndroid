@@ -54,7 +54,7 @@ class OccasionWorker(
                 val o = arr.getJSONObject(i)
                 if (o.optInt("m") == j[1] && o.optInt("d") == j[2]) {
                     val group = o.optString("group")
-                    for (c in db.contactDao().eligible(group)) {
+                    for (c in db.contactDao().eligible(group).filter { !ExtraDb.get(ctx).isBlocked(it.phone) }) {
                         jobs.add(Triple(c, o.optString("message"), group))
                     }
                 }
@@ -63,7 +63,7 @@ class OccasionWorker(
             if (bd.length() > 0) {
                 val key = "${j[1]}/${j[2]}"
                 val msg = sp.getString("birthday_msg", null) ?: "سلام {نام}، تولدت مبارک! 🎂"
-                for (c in db.contactDao().eligible("")) {
+                for (c in db.contactDao().eligible("").filter { !ExtraDb.get(ctx).isBlocked(it.phone) }) {
                     val p = PhoneUtil.toIranMobile(c.phone) ?: PhoneUtil.normalize(c.phone)
                     if (bd.optString(p) == key) jobs.add(Triple(c, msg, ""))
                 }
