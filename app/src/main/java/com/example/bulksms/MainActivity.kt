@@ -61,7 +61,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         db = AppDatabase.get(this)
         scheduleOccasionWorker()
-        if (isLockEnabled() && !sessionUnlocked) showLock() else { sessionUnlocked = true; buildUi(); maybeWelcome() }
+        if (isLockEnabled() && !sessionUnlocked) showLock() else { sessionUnlocked = true; buildUi(); maybeWelcome(); maybeCheckUpdate(); maybeCrashNotice() }
         if (!hasSmsPerm() || !hasPhonePerm() || !hasRecvPerm()) {
             permLauncher.launch(allPerms())
         }
@@ -369,6 +369,11 @@ class MainActivity : AppCompatActivity() {
                     fj.put(p, o)
                 }
                 root.put("fields", fj)
+                val exb = ExtraDb.get(this@MainActivity)
+                root.put("blacklist", org.json.JSONArray(exb.blacklist()))
+                val cj = org.json.JSONObject()
+                exb.allConsents().forEach { (p, v) -> cj.put(p, org.json.JSONObject().put("ts", v.first).put("src", v.second)) }
+                root.put("consent", cj)
                 root.put("version", 1)
                 contentResolver.openOutputStream(uri)?.use { it.write(root.toString(2).toByteArray(Charsets.UTF_8)) }
                 withContext(Dispatchers.Main) { toast("پشتیبان ذخیره شد: ${arr.length()} مخاطب") }
@@ -400,6 +405,21 @@ class MainActivity : AppCompatActivity() {
                     val l = mutableListOf<String>()
                     for (i in 0 until ta.length()) l.add(ta.getString(i))
                     if (l.isNotEmpty()) saveTemplates(l)
+                }
+                val bla = root.optJSONArray("blacklist")
+                if (bla != null) {
+                    val exr = ExtraDb.get(this@MainActivity)
+                    for (i in 0 until bla.length()) exr.addBlacklist(bla.getString(i))
+                }
+                val cjr = root.optJSONObject("consent")
+                if (cjr != null) {
+                    val exr2 = ExtraDb.get(this@MainActivity)
+                    val ks2 = cjr.keys()
+                    while (ks2.hasNext()) {
+                        val p2 = ks2.next()
+                        val o2 = cjr.optJSONObject(p2) ?: continue
+                        exr2.setConsent(p2, o2.optLong("ts"), o2.optString("src"))
+                    }
                 }
                 val fj = root.optJSONObject("fields")
                 if (fj != null) {
@@ -1393,6 +1413,101 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("متوجه شدم", null).show()
     }
 
+    // ---------- updates & crash log ----------
+    private fun currentVersion(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+    } catch (e: Exception) { "?" }
+
+    private fun maybeCheckUpdate() {
+        val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        if (now - sp.getLong("update_checked", 0L) < 24L * 3600_000L) return
+        sp.edit().putLong("update_checked", now).apply()
+        checkUpdate(true)
+    }
+
+    private fun checkUpdate(silent: Boolean) {
+        val repo = getSharedPreferences("settings", Context.MODE_PRIVATE).getString("update_repo", UpdateChecker.DEFAULT_REPO) ?: UpdateChecker.DEFAULT_REPO
+        lifecycleScope.launch(Dispatchers.IO) {
+            val (info, err) = UpdateChecker.fetchLatest(repo)
+            withContext(Dispatchers.Main) {
+                val cur = currentVersion()
+                if (info == null) {
+                    if (!silent) toast(err ?: "بررسی نسخه ناموفق بود.")
+                } else if (UpdateChecker.isNewer(info.tag, cur)) {
+                    showUpdateDialog(info, cur)
+                } else if (!silent) {
+                    toast("شما آخرین نسخه ($cur) را دارید.")
+                }
+                Unit
+            }
+        }
+    }
+
+    private fun showUpdateDialog(info: UpdateChecker.Info, cur: String) {
+        AlertDialog.Builder(this).setTitle("نسخه جدید: ${info.tag}")
+            .setMessage("نسخه فعلی: $cur\n\n" + info.notes.take(600))
+            .setPositiveButton("دانلود") { _, _ ->
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl ?: info.pageUrl)))
+            }
+            .setNegativeButton("بعداً", null).show()
+    }
+
+    private fun updateMenu() {
+        val repo = getSharedPreferences("settings", Context.MODE_PRIVATE).getString("update_repo", UpdateChecker.DEFAULT_REPO) ?: UpdateChecker.DEFAULT_REPO
+        AlertDialog.Builder(this).setTitle("به‌روزرسانی برنامه")
+            .setItems(arrayOf("🔍  بررسی نسخه جدید (نسخه فعلی: ${currentVersion()})", "🔗  ریپوی منبع: $repo (تغییر)")) { _, i ->
+                if (i == 0) checkUpdate(false) else changeRepoDialog()
+            }.setNegativeButton("بستن", null).show()
+    }
+
+    private fun changeRepoDialog() {
+        val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val input = styledInput("owner/repo").apply { setText(sp.getString("update_repo", UpdateChecker.DEFAULT_REPO)) }
+        AlertDialog.Builder(this).setTitle("ریپوی به‌روزرسانی").setView(input)
+            .setPositiveButton("ذخیره") { _, _ ->
+                val t = input.text.toString().trim()
+                if (Regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$").matches(t)) { sp.edit().putString("update_repo", t).apply(); toast("ذخیره شد.") }
+                else toast("فرمت درست: owner/repo")
+            }
+            .setNegativeButton("انصراف", null).show()
+    }
+
+    private fun crashDialog() {
+        val files = CrashLog.list(this)
+        if (files.isEmpty()) { toast("خطایی ثبت نشده است 👍"); return }
+        val labels = files.map { f ->
+            val first = f.readText().lines().firstOrNull { it.contains("Exception") || it.contains("Error") }?.trim()?.take(70) ?: ""
+            fmtJalali(f.lastModified()) + "\n" + first
+        }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("گزارش خطاها (${files.size})")
+            .setItems(labels) { _, i -> showCrash(files[i]) }
+            .setNeutralButton("حذف همه") { _, _ -> files.forEach { it.delete() }; toast("پاک شد.") }
+            .setNegativeButton("بستن", null).show()
+    }
+
+    private fun showCrash(f: java.io.File) {
+        val text = f.readText()
+        AlertDialog.Builder(this).setTitle("جزئیات خطا").setMessage(text.take(3000))
+            .setPositiveButton("اشتراک‌گذاری") { _, _ ->
+                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "ارسال گزارش"))
+            }
+            .setNegativeButton("بستن", null).show()
+    }
+
+    private fun maybeCrashNotice() {
+        val files = CrashLog.list(this)
+        if (files.isEmpty()) return
+        val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val newest = files[0].lastModified()
+        if (newest <= sp.getLong("crash_seen", 0L)) return
+        sp.edit().putLong("crash_seen", newest).apply()
+        AlertDialog.Builder(this).setTitle("برنامه با خطا بسته شده بود")
+            .setMessage("گزارش خطا ذخیره شده است. برای رفع مشکل می‌توانید آن را برای پشتیبانی بفرستید.")
+            .setPositiveButton("مشاهده") { _, _ -> showCrash(files[0]) }
+            .setNegativeButton("بعداً", null).show()
+    }
+
     private fun allPerms(): Array<String> {
         val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE, android.Manifest.permission.RECEIVE_SMS)
         if (android.os.Build.VERSION.SDK_INT >= 33) l.add("android.permission.POST_NOTIFICATIONS")
@@ -2181,6 +2296,8 @@ class MainActivity : AppCompatActivity() {
                 .putInt("sim_limit",toAsciiDigits(sl.text.toString()).toIntOrNull()?.coerceAtLeast(0)?:0).apply()
             toast("ذخیره شد.")
         }
+        addButton("⬆  به‌روزرسانی برنامه"){updateMenu()}
+        addButton("🐞  گزارش خطاهای برنامه"){crashDialog()}
         addButton("🔏  حریم خصوصی و شرایط استفاده"){privacyDialog()}
         addButton("🌐  ارسال از طریق API / پنل پیامک"){apiMenu()}
         addButton("🎂  مناسبت‌ها و تولد"){occasionsMenu()}
@@ -2192,7 +2309,7 @@ class MainActivity : AppCompatActivity() {
         addSection("اطلاعات برنامه")
         addText("زبان: فارسی")
         addText("جهت برنامه: راست‌به‌چپ")
-        addText("نسخه: ۳.۰.۰")
+        addText("نسخه: " + currentVersion())
         addText("سازنده: نوید بلانیان")
         addSection("حریم و رضایت")
         addText("ارسال فقط برای مخاطبانی انجام می‌شود که اجازه دریافت پیام دارند. مخاطبانِ دارای عدم دریافت از ارسال حذف می‌شوند.")

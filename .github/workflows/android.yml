@@ -10,6 +10,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -25,13 +27,57 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
+      - name: Prepare release keystore (if secrets exist)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "HAS_KEYSTORE=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build signed release APK
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle --no-daemon assembleRelease
+
+      - name: Build debug APK (no keystore configured)
+        if: env.HAS_KEYSTORE != 'true'
         run: gradle --no-daemon assembleDebug
 
-      - name: Upload APK
+      - name: Upload release APK
+        if: env.HAS_KEYSTORE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BulkSmsAndroid-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload debug APK
+        if: env.HAS_KEYSTORE != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: BulkSmsAndroid-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Read version
+        if: env.HAS_KEYSTORE == 'true'
+        run: |
+          VERSION_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
+      - name: Publish GitHub Release
+        if: env.HAS_KEYSTORE == 'true' && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION_NAME }}
+          name: v${{ env.VERSION_NAME }}
+          files: app/build/outputs/apk/release/*.apk
+          make_latest: true
