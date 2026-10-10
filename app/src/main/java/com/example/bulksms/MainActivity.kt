@@ -27,6 +27,11 @@ private var sessionUnlocked = false
 
 private class OccRow(val text: String, val days: Int, val remove: () -> Unit)
 
+private class CampStat(
+    val total: Int, val processed: Int, val sent: Int, val delivered: Int, val failed: Int,
+    val retried: Int, val optedOut: Int, val failedLogs: List<SendLogEntity>
+)
+
 class MainActivity : AppCompatActivity() {
     private lateinit var db: AppDatabase
     private lateinit var content: LinearLayout
@@ -142,20 +147,27 @@ class MainActivity : AppCompatActivity() {
             }.setNegativeButton("بستن", null).show()
     }
 
-    private fun importRows(rows: List<Triple<String, String, String>>) {
+    private fun importRows(rows: List<Triple<String, String, String>>, extras: List<Map<String, String>> = emptyList()) {
         lifecycleScope.launch(Dispatchers.IO) {
             val existing = db.contactDao().getAll().map { parseIranPhone(it.phone) ?: it.phone }.toHashSet()
-            var added = 0; var dup = 0; var bad = 0
-            for ((name, phone, group) in rows) {
-                val ph = parseIranPhone(phone)
+            val extra = ExtraDb.get(this@MainActivity)
+            var added = 0; var dup = 0; var bad = 0; var fieldRows = 0
+            for ((idx, r) in rows.withIndex()) {
+                val ph = parseIranPhone(r.second)
                 if (ph == null) { bad++; continue }
-                if (!existing.add(ph)) { dup++; continue }
-                db.contactDao().upsert(ContactEntity(name = name.trim(), phone = ph, groupName = group.trim()))
-                added++
+                if (existing.add(ph)) {
+                    db.contactDao().upsert(ContactEntity(name = r.first.trim(), phone = ph, groupName = r.third.trim()))
+                    added++
+                } else dup++
+                val f = extras.getOrNull(idx)
+                if (f != null && f.isNotEmpty()) {
+                    for ((k, v) in f) extra.setField(ph, k, v)
+                    fieldRows++
+                }
             }
             withContext(Dispatchers.Main) {
                 AlertDialog.Builder(this@MainActivity).setTitle("نتیجه وارد کردن")
-                    .setMessage("ردیف‌های خوانده‌شده: ${rows.size}\n✅ افزوده‌شده: $added\n🔁 تکراری: $dup\n⚠️ نامعتبر: $bad")
+                    .setMessage("ردیف‌های خوانده‌شده: ${rows.size}\n✅ افزوده‌شده: $added\n🔁 تکراری: $dup\n⚠️ نامعتبر: $bad\n🧩 ردیف‌های دارای فیلد دلخواه: $fieldRows")
                     .setPositiveButton("تأیید") { _, _ -> showTab(1) }.show()
             }
         }
@@ -165,20 +177,55 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val text = contentResolver.openInputStream(uri)?.use { String(it.readBytes(), Charsets.UTF_8) }?.removePrefix("\uFEFF") ?: ""
+                val lines = text.split(Regex("[\\r\\n]+")).filter { it.isNotBlank() }
                 val rows = mutableListOf<Triple<String, String, String>>()
-                for (line in text.split(Regex("[\\r\\n]+"))) {
-                    if (line.isBlank()) continue
-                    val cells = line.split(Regex("[,;\\t]")).map { it.trim().trim('"').trim() }
+                val extras = mutableListOf<Map<String, String>>()
+                if (lines.isEmpty()) { importRows(rows); return@launch }
+                val sep = Regex("[,;\\t]")
+                fun cellsOf(l: String) = l.split(sep).map { it.trim().trim('"').trim() }
+                fun cell(cells: List<String>, i: Int) = if (i >= 0 && i < cells.size) cells[i] else ""
+                val first = cellsOf(lines[0])
+                val hasHeader = first.none { parseIranPhone(it) != null } && first.any { c -> c.any { ch -> ch.isLetter() } }
+                var nameI = -1; var phoneI = -1; var groupI = -1
+                val fieldCols = LinkedHashMap<Int, String>()
+                if (hasHeader) {
+                    val nameKeys = setOf("نام", "name", "نام و نام خانوادگی", "fullname", "full name")
+                    val phoneKeys = setOf("شماره", "موبایل", "تلفن", "phone", "mobile", "شماره موبایل", "mobile number")
+                    val groupKeys = setOf("گروه", "group")
+                    for ((i, h) in first.withIndex()) {
+                        val k = h.trim().lowercase()
+                        if (k.isEmpty()) continue
+                        if (k in nameKeys) nameI = i
+                        else if (k in phoneKeys) phoneI = i
+                        else if (k in groupKeys) groupI = i
+                        else fieldCols[i] = h.trim()
+                    }
+                }
+                val start = if (hasHeader) 1 else 0
+                for (li in start until lines.size) {
+                    val cells = cellsOf(lines[li])
+                    if (hasHeader && phoneI >= 0) {
+                        rows.add(Triple(cell(cells, nameI), cell(cells, phoneI), cell(cells, groupI)))
+                        val f = LinkedHashMap<String, String>()
+                        for ((i, k) in fieldCols) {
+                            val v = cell(cells, i)
+                            if (v.isNotEmpty()) f[k] = v
+                        }
+                        extras.add(f)
+                        continue
+                    }
                     val phone = cells.firstOrNull { parseIranPhone(it) != null }
                     if (phone == null) {
                         if (cells.none { c -> c.any { ch -> ch.isDigit() } }) continue
-                        rows.add(Triple("", cells.firstOrNull { it.isNotEmpty() } ?: line, ""))
+                        rows.add(Triple("", cells.firstOrNull { it.isNotEmpty() } ?: lines[li], ""))
+                        extras.add(emptyMap())
                         continue
                     }
                     val others = cells.filter { it != phone && it.isNotEmpty() }
                     rows.add(Triple(others.getOrElse(0) { "" }, phone, others.getOrElse(1) { "" }))
+                    extras.add(emptyMap())
                 }
-                importRows(rows)
+                importRows(rows, extras)
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { toast("خطا در خواندن فایل: ${e.message}") }
             }
@@ -315,6 +362,13 @@ class MainActivity : AppCompatActivity() {
                     .put("list", org.json.JSONArray(op.getString("list", "[]")))
                     .put("birthdays", org.json.JSONObject(op.getString("birthdays", "{}")))
                     .put("birthday_msg", op.getString("birthday_msg", "") ?: ""))
+                val fj = org.json.JSONObject()
+                ExtraDb.get(this@MainActivity).allFields().forEach { (p, m) ->
+                    val o = org.json.JSONObject()
+                    m.forEach { (k, v) -> o.put(k, v) }
+                    fj.put(p, o)
+                }
+                root.put("fields", fj)
                 root.put("version", 1)
                 contentResolver.openOutputStream(uri)?.use { it.write(root.toString(2).toByteArray(Charsets.UTF_8)) }
                 withContext(Dispatchers.Main) { toast("پشتیبان ذخیره شد: ${arr.length()} مخاطب") }
@@ -346,6 +400,19 @@ class MainActivity : AppCompatActivity() {
                     val l = mutableListOf<String>()
                     for (i in 0 until ta.length()) l.add(ta.getString(i))
                     if (l.isNotEmpty()) saveTemplates(l)
+                }
+                val fj = root.optJSONObject("fields")
+                if (fj != null) {
+                    val ex = ExtraDb.get(this@MainActivity)
+                    val ks = fj.keys()
+                    while (ks.hasNext()) {
+                        val p = ks.next()
+                        val o = fj.optJSONObject(p) ?: continue
+                        val m = LinkedHashMap<String, String>()
+                        val kk = o.keys()
+                        while (kk.hasNext()) { val k = kk.next(); m[k] = o.optString(k) }
+                        ex.replaceFields(p, m)
+                    }
                 }
                 val oc = root.optJSONObject("occasions")
                 if (oc != null) {
@@ -1013,6 +1080,94 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("انصراف", null).show()
     }
 
+    // ---------- campaigns ----------
+    private suspend fun campaignStats(c: ExtraDb.Campaign): CampStat {
+        val ids = ExtraDb.get(this).logIds(c.id)
+        val logs = ArrayList<SendLogEntity>()
+        ids.chunked(500).forEach { logs.addAll(db.sendLogDao().byIds(it)) }
+        fun ok(st: String) = st == Status.SENT || st == Status.DELIVERED || st == Status.UNDELIVERED || st == "موفق"
+        val failed = logs.filter { it.status.startsWith(Status.FAIL) }
+        val phones = logs.map { PhoneUtil.toIranMobile(it.phone) ?: it.phone }.toHashSet()
+        val opted = db.contactDao().getAll().count { it.optedOut && (PhoneUtil.toIranMobile(it.phone) ?: it.phone) in phones }
+        return CampStat(
+            c.total, logs.size, logs.count { ok(it.status) }, logs.count { it.status == Status.DELIVERED },
+            failed.size, logs.count { it.status == Status.RETRIED }, opted, failed
+        )
+    }
+
+    private fun campaignsDialog() {
+        lifecycleScope.launch {
+            val extra = ExtraDb.get(this@MainActivity)
+            val list = withContext(Dispatchers.IO) { extra.campaigns() }
+            if (list.isEmpty()) { toast("هنوز کمپینی ثبت نشده است. از تب «ارسال» شروع کنید."); return@launch }
+            val stats = withContext(Dispatchers.IO) { list.map { campaignStats(it) } }
+            val labels = list.indices.map { i ->
+                val c = list[i]; val st = stats[i]
+                "📣 ${c.name}\n${fmtJalali(c.created)}  •  ${st.total} پیام\n✅ ${st.sent}   📬 ${st.delivered}   ❌ ${st.failed}"
+            }.toTypedArray()
+            AlertDialog.Builder(this@MainActivity).setTitle("کمپین‌ها (${list.size})")
+                .setItems(labels) { _, i -> campaignDetail(list[i], stats[i]) }
+                .setNegativeButton("بستن", null).show()
+        }
+    }
+
+    private fun campaignDetail(c: ExtraDb.Campaign, st: CampStat) {
+        val rate = if (st.sent > 0) "${st.delivered * 100 / st.sent}٪" else "—"
+        val waiting = maxOf(0, st.total - st.processed)
+        val msg = "📅 ${fmtJalali(c.created)}\nگروه: ${c.group.ifBlank { "همه" }}\n\n" +
+            "کل پیام‌ها: ${st.total}\nارسال‌شده: ${st.sent}\nتحویل‌شده: ${st.delivered}  (نرخ تحویل: $rate)\n" +
+            "ناموفق: ${st.failed}\nارسال مجدد شده: ${st.retried}\nدر انتظار ارسال: $waiting\n" +
+            "هم‌اکنون عدم‌دریافت: ${st.optedOut}\n\nمتن پیام:\n${c.message}"
+        AlertDialog.Builder(this).setTitle(c.name).setMessage(msg)
+            .setPositiveButton("ارسال مجدد ناموفق‌ها (${st.failed})") { _, _ -> resendLogs(st.failedLogs, "ارسال مجدد: ${c.name}") }
+            .setNeutralButton("حذف کمپین") { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    ExtraDb.get(this@MainActivity).deleteCampaign(c.id)
+                    withContext(Dispatchers.Main) { toast("کمپین حذف شد (گزارش پیام‌ها باقی می‌ماند).") }
+                }
+            }
+            .setNegativeButton("بستن", null).show()
+    }
+
+    // ---------- custom contact fields ----------
+    private fun fieldsLink(phone: EditText): TextView = TextView(this).apply {
+        text = "🧩  فیلدهای دلخواه (شرکت، مبلغ، …)"
+        textSize = 13f
+        setTextColor(BLUE)
+        gravity = Gravity.RIGHT
+        setPadding(dp(4), dp(2), dp(4), dp(8))
+        setOnClickListener { fieldsDialog(phone.text.toString()) }
+    }
+
+    private fun fieldsDialog(phoneRaw: String) {
+        val ph = PhoneUtil.toIranMobile(phoneRaw)
+        if (ph == null) { toast("ابتدا شماره معتبر را وارد کنید."); return }
+        lifecycleScope.launch {
+            val extra = ExtraDb.get(this@MainActivity)
+            val cur = withContext(Dispatchers.IO) { extra.fieldsOf(ph) }
+            val input = styledInput("هر خط: کلید=مقدار (مثلاً شرکت=آسمان)", 5).apply {
+                setText(cur.entries.joinToString("\n") { it.key + "=" + it.value })
+            }
+            AlertDialog.Builder(this@MainActivity).setTitle("فیلدهای $ph").setView(input)
+                .setPositiveButton("ذخیره") { _, _ ->
+                    val map = LinkedHashMap<String, String>()
+                    for (l in input.text.toString().lines()) {
+                        val i = l.indexOf('=')
+                        if (i > 0) {
+                            val k = l.substring(0, i).trim()
+                            val v = l.substring(i + 1).trim()
+                            if (k.isNotEmpty()) map[k] = v
+                        }
+                    }
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        extra.replaceFields(ph, map)
+                        withContext(Dispatchers.Main) { toast("ذخیره شد. در متن پیام از {کلید} استفاده کنید.") }
+                    }
+                }
+                .setNegativeButton("انصراف", null).show()
+        }
+    }
+
     private fun allPerms(): Array<String> {
         val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE, android.Manifest.permission.RECEIVE_SMS)
         if (android.os.Build.VERSION.SDK_INT >= 33) l.add("android.permission.POST_NOTIFICATIONS")
@@ -1028,34 +1183,48 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun startCampaign(contacts: List<ContactEntity>, template: String, group: String, interval: Int) {
+    private fun startCampaign(contacts: List<ContactEntity>, template: String, group: String, interval: Int, name: String) {
         if (contacts.isEmpty()) { toast("مخاطب واجد شرایطی پیدا نشد."); return }
         lifecycleScope.launch(Dispatchers.IO) {
+            val extra = ExtraDb.get(this@MainActivity)
+            val fields = extra.allFields()
+            val cname = name.ifBlank { "کمپین " + fmtJalali(System.currentTimeMillis()) }
+            val cid = extra.createCampaign(cname, contacts.size, group, template)
             val items = contacts.map { c ->
                 QueueItemEntity(
                     phone = PhoneUtil.normalize(c.phone),
-                    message = template.replace("{نام}", c.name.ifBlank { "دوست عزیز" }),
+                    message = personalize(template, c, fields),
                     groupName = group,
                     subscriptionId = selectedSubscriptionId
                 )
             }
             db.queueDao().clear()
             db.queueDao().insertAll(items)
-            getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putInt("interval", interval).apply()
-            withContext(Dispatchers.Main) { launchService(); toast("ارسال در پس‌زمینه شروع شد.") }
+            getSharedPreferences("settings", Context.MODE_PRIVATE).edit()
+                .putInt("interval", interval).putLong("active_campaign", cid).apply()
+            withContext(Dispatchers.Main) { launchService(); toast("کمپین «$cname» شروع شد.") }
         }
     }
 
-    private fun resendFailed() {
+    private fun resendLogs(logs: List<SendLogEntity>, name: String) {
+        val failed = logs.distinctBy { it.phone }
+        if (failed.isEmpty()) { toast("ارسال ناموفقی وجود ندارد."); return }
         lifecycleScope.launch(Dispatchers.IO) {
-            val failed = db.sendLogDao().failedLogs().distinctBy { it.phone }
-            if (failed.isEmpty()) { withContext(Dispatchers.Main) { toast("ارسال ناموفقی وجود ندارد.") }; return@launch }
+            val cid = ExtraDb.get(this@MainActivity).createCampaign(name, failed.size, failed.first().groupName, failed.first().message)
             db.queueDao().clear()
             db.queueDao().insertAll(failed.map {
                 QueueItemEntity(phone = it.phone, message = it.message, groupName = it.groupName, subscriptionId = selectedSubscriptionId)
             })
-            db.sendLogDao().markFailedRetried()
+            logs.map { it.id }.chunked(500).forEach { db.sendLogDao().setStatusMany(it, Status.RETRIED) }
+            getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putLong("active_campaign", cid).apply()
             withContext(Dispatchers.Main) { launchService(); toast("${failed.size} پیام دوباره در صف قرار گرفت.") }
+        }
+    }
+
+    private fun resendFailed() {
+        lifecycleScope.launch {
+            val f = withContext(Dispatchers.IO) { db.sendLogDao().failedLogs() }
+            resendLogs(f, "ارسال مجدد ناموفق‌ها")
         }
     }
 
@@ -1420,7 +1589,7 @@ class MainActivity : AppCompatActivity() {
         val name=EditText(this).apply{hint="نام و نام خانوادگی";setText(existing?.name?:"");setBackgroundResource(R.drawable.input_bg)}
         val phone=EditText(this).apply{hint="شماره موبایل";setText(existing?.phone?:"");setBackgroundResource(R.drawable.input_bg)}
         val group=EditText(this).apply{hint="گروه";setText(existing?.groupName?:"");setBackgroundResource(R.drawable.input_bg)}
-        box.addView(name,marginParams());box.addView(phone,marginParams());box.addView(group,marginParams());box.addView(groupLink(group))
+        box.addView(name,marginParams());box.addView(phone,marginParams());box.addView(group,marginParams());box.addView(groupLink(group));box.addView(fieldsLink(phone))
         AlertDialog.Builder(this).setTitle(if(existing==null)"افزودن مخاطب" else "ویرایش مخاطب").setView(box)
             .setPositiveButton("ذخیره"){_,_->
                 val p=phone.text.toString().trim()
@@ -1441,10 +1610,11 @@ class MainActivity : AppCompatActivity() {
     private fun sending() {
         addTitle("ارسال پیامک")
         addText("پیام خود را آماده کنید و قبل از ارسال تعداد گیرندگان را بررسی کنید.")
+        val campName=styledInput("نام کمپین (اختیاری)")
         val group=styledInput("گروه — خالی یعنی همه").apply{setText(presetGroup);presetGroup=""}
         val message=styledInput("متن پیام",5)
         val interval=styledInput("فاصله بین پیام‌ها به ثانیه").apply{setText(getSharedPreferences("settings",Context.MODE_PRIVATE).getInt("interval",3).toString())}
-        content.addView(group);content.addView(groupLink(group));content.addView(message)
+        content.addView(campName);content.addView(group);content.addView(groupLink(group));content.addView(message)
         val counter=TextView(this).apply{textSize=12f;gravity=Gravity.RIGHT;setTextColor(col(R.color.app_t4));text="0 کاراکتر"}
         content.addView(counter)
         val optTxt=android.widget.CheckBox(this).apply{text="افزودن «لغو۱۱» به انتهای پیام (مخاطب با پاسخ لغو۱۱ حذف می‌شود)";layoutDirection=rtl;textSize=13f}
@@ -1468,7 +1638,7 @@ class MainActivity : AppCompatActivity() {
         addButton("🚀  شروع ارسال"){
             val text=message.text.toString()
             if(text.isBlank()){toast("متن پیام را وارد کنید.");return@addButton}
-            confirmSend(group.text.toString().trim(),if(optTxt.isChecked) text+"\nلغو۱۱" else text,interval.text.toString().toIntOrNull()?.coerceAtLeast(0)?:3)
+            confirmSend(group.text.toString().trim(),if(optTxt.isChecked) text+"\nلغو۱۱" else text,interval.text.toString().toIntOrNull()?.coerceAtLeast(0)?:3,campName.text.toString().trim())
         }
         progress=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply{max=100;progress=0}
         content.addView(progress,marginParams())
@@ -1478,11 +1648,20 @@ class MainActivity : AppCompatActivity() {
         addButton("🔁  ارسال مجدد به ناموفق‌ها"){resendFailed()}
         addButton("⏹  لغو صف باقی‌مانده"){cancelQueue()}
         startPolling()
-        addText("متغیر شخصی‌سازی: {نام}  ← نام مخاطب را جایگزین می‌کند.")
+        addText("متغیرها: {نام} {شماره} {گروه} و فیلدهای دلخواه مخاطب مثل {شرکت} (از وارد کردن CSV یا ویرایش مخاطب).")
         addText("⛔ مخاطبانی که عدم دریافت را انتخاب کرده‌اند، ارسال دریافت نمی‌کنند.")
     }
 
-    private fun confirmSend(group:String,text:String,interval:Int) {
+    private fun personalize(t: String, c: ContactEntity, fields: Map<String, Map<String, String>>): String {
+        var r = t.replace("{نام}", c.name.ifBlank { "دوست عزیز" }).replace("{شماره}", c.phone).replace("{گروه}", c.groupName)
+        val f = fields[PhoneUtil.toIranMobile(c.phone) ?: PhoneUtil.normalize(c.phone)]
+        if (f != null) {
+            for ((k, v) in f) r = r.replace("{" + k + "}", v)
+        }
+        return r
+    }
+
+    private fun confirmSend(group:String,text:String,interval:Int,name:String) {
         if(!hasSmsPerm() && !ApiSender.isApiMode(this)){
             permLauncher.launch(arrayOf(android.Manifest.permission.SEND_SMS,android.Manifest.permission.READ_PHONE_STATE))
             AlertDialog.Builder(this).setTitle("مجوز ارسال پیامک")
@@ -1493,14 +1672,52 @@ class MainActivity : AppCompatActivity() {
         }
         lifecycleScope.launch(Dispatchers.IO) {
             val contacts=db.contactDao().eligible(group)
+            val fields=ExtraDb.get(this@MainActivity).allFields()
+            val pat=Regex("\\{[^}]+\\}")
+            val ready=contacts.filter{ !pat.containsMatchIn(personalize(text,it,fields)) }
+            val skipped=contacts.size-ready.size
+            val sample=ready.firstOrNull()?.let{ personalize(text,it,fields) }
             withContext(Dispatchers.Main) {
+                val sb=StringBuilder()
+                sb.append("گیرندگان مجاز: ${ready.size}\n")
+                sb.append("روش ارسال: ${if(ApiSender.isApiMode(this@MainActivity))"API / پنل پیامک" else "سیم‌کارت"}\n")
+                sb.append("فاصله: $interval ثانیه\n")
+                if(skipped>0) sb.append("\n⚠ $skipped مخاطب فیلد لازم برای متغیرهای پیام را ندارند و ارسال نمی‌شوند.\n")
+                if(sample!=null) sb.append("\n👁 نمونه پیام:\n$sample\n")
+                sb.append("\nارسال شروع شود؟")
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("تأیید ارسال")
-                    .setMessage("گیرندگان مجاز: ${contacts.size}\nروش ارسال: ${if(ApiSender.isApiMode(this@MainActivity))"API / پنل پیامک" else "سیم‌کارت"}\nفاصله: $interval ثانیه\n\nارسال شروع شود؟")
-                    .setPositiveButton("شروع"){_,_->startCampaign(contacts,text,group,interval)}
+                    .setMessage(sb.toString())
+                    .setPositiveButton("شروع"){_,_->startCampaign(ready,text,group,interval,name)}
+                    .setNeutralButton("ارسال تست"){_,_->testSendDialog(sample?:text)}
                     .setNegativeButton("انصراف",null).show()
             }
         }
+    }
+
+    private fun testSendDialog(text: String) {
+        val input = styledInput("شماره موبایل خودتان").apply { inputType = android.text.InputType.TYPE_CLASS_PHONE }
+        AlertDialog.Builder(this).setTitle("ارسال تست").setView(input)
+            .setPositiveButton("ارسال") { _, _ ->
+                val num = PhoneUtil.normalize(input.text.toString())
+                if (num.isEmpty()) toast("شماره را وارد کنید.")
+                else lifecycleScope.launch(Dispatchers.IO) {
+                    val res: Pair<Boolean, String> =
+                        if (ApiSender.isApiMode(this@MainActivity)) ApiSender.send(this@MainActivity, num, text)
+                        else if (!hasSmsPerm()) Pair(false, "مجوز ارسال پیامک داده نشده است.")
+                        else try {
+                            val sms = smsManager(selectedSubscriptionId)
+                            val parts = sms.divideMessage(text)
+                            if (parts.size > 1) sms.sendMultipartTextMessage(num, null, parts, null, null)
+                            else sms.sendTextMessage(num, null, text, null, null)
+                            Pair(true, "پیام تست ارسال شد (در گزارش‌ها ثبت نمی‌شود).")
+                        } catch (e: Exception) {
+                            Pair(false, "خطا: ${e.message}")
+                        }
+                    withContext(Dispatchers.Main) { toast(if (res.first && ApiSender.isApiMode(this@MainActivity)) "پیام تست ارسال شد." else res.second) }
+                }
+            }
+            .setNegativeButton("انصراف", null).show()
     }
 
     private suspend fun sendMessages(contacts:List<ContactEntity>,template:String,group:String,interval:Int) {
@@ -1621,6 +1838,7 @@ class MainActivity : AppCompatActivity() {
         val spS=Spinner(this).apply{adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,arrayOf("همه وضعیت‌ها","ارسال‌شده و تحویل‌شده","فقط تحویل‌شده","ناموفق","لغو توسط مخاطب"));layoutDirection=rtl}
         val search=styledInput("🔎 جستجوی شماره یا متن")
         content.addView(spP);content.addView(spS);content.addView(search,marginParams())
+        addButton("📣  کمپین‌ها و مقایسه"){campaignsDialog()}
         addButton("📄  ذخیره گزارش CSV (قابل باز شدن در اکسل)"){exportLauncher.launch("گزارش_پیامک.csv")}
         addButton("🗑  پاک کردن تاریخچه"){
             AlertDialog.Builder(this).setTitle("پاک کردن تاریخچه").setMessage("همه گزارش‌ها حذف شوند؟").setPositiveButton("بله"){_,_->lifecycleScope.launch{db.sendLogDao().clear();reports()}}.setNegativeButton("خیر",null).show()

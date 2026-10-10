@@ -127,6 +127,10 @@ class SendService : Service() {
         val logId = db.sendLogDao().insert(
             SendLogEntity(phone = num, message = item.message, groupName = item.groupName, status = Status.SENDING)
         )
+        val cid = getSharedPreferences("settings", Context.MODE_PRIVATE).getLong("active_campaign", 0L)
+        if (cid > 0L) {
+            try { ExtraDb.get(applicationContext).addLog(cid, logId) } catch (_: Exception) { }
+        }
         if (ApiSender.isApiMode(applicationContext)) {
             val r = ApiSender.send(applicationContext, num, item.message)
             db.sendLogDao().setStatus(logId, if (r.first) Status.SENT else Status.FAIL + ": " + r.second)

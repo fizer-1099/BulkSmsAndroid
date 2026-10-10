@@ -92,6 +92,12 @@ interface SendLogDao {
     @Query("UPDATE send_logs SET status = :s WHERE id = :id")
     suspend fun setStatus(id: Long, s: String)
 
+    @Query("SELECT * FROM send_logs WHERE id IN (:ids)")
+    suspend fun byIds(ids: List<Long>): List<SendLogEntity>
+
+    @Query("UPDATE send_logs SET status = :s WHERE id IN (:ids)")
+    suspend fun setStatusMany(ids: List<Long>, s: String)
+
     @Query("UPDATE send_logs SET status = :s WHERE id = :id AND status NOT LIKE 'ناموفق%' AND status != 'تحویل\u200cشده'")
     suspend fun markSent(id: Long, s: String)
 
