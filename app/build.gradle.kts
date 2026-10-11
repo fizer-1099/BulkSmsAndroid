@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.bulksms"
         minSdk = 26
         targetSdk = 35
-        versionCode = 38
-        versionName = "3.7.1"
+        versionCode = 39
+        versionName = "3.7.2"
     }
 
     signingConfigs {

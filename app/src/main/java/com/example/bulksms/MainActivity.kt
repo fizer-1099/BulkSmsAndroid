@@ -1689,7 +1689,7 @@ class MainActivity : AppCompatActivity() {
         })
         header.addView(titleBox, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(TextView(this).apply {
-            text = "۲.۳"
+            text = "v" + currentVersion()
             textSize = 13f
             setTextColor(col(R.color.app_t3))
             setPadding(dp(10),dp(7),dp(10),dp(7))
