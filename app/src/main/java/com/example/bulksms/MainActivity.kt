@@ -62,12 +62,9 @@ class MainActivity : AppCompatActivity() {
         db = AppDatabase.get(this)
         scheduleOccasionWorker()
         if (isLockEnabled() && !sessionUnlocked) showLock() else { sessionUnlocked = true; buildUi(); maybeWelcome(); maybeCheckUpdate(); maybeCrashNotice() }
-        if (!hasSmsPerm() || !hasPhonePerm() || !hasRecvPerm()) {
-            permLauncher.launch(allPerms())
-        }
     }
 
-    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res -> onPermResult(res) }
     private fun hasSmsPerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.SEND_SMS) == android.content.pm.PackageManager.PERMISSION_GRANTED
     private fun hasPhonePerm() = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED
     private val tabViews = mutableListOf<TextView>()
@@ -519,11 +516,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun maybeWelcome() {
         val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
-        if (sp.getBoolean("welcomed", false)) return
+        if (sp.getBoolean("welcomed", false)) { askPermsWithRationale(); return }
         sp.edit().putBoolean("welcomed", true).apply()
         AlertDialog.Builder(this).setTitle("خوش آمدید 👋")
             .setMessage("۱) از «مخاطبین» شماره‌ها را وارد کنید (TXT، CSV یا مخاطبین گوشی).\n۲) در «ارسال» متن را بنویسید و ارسال را شروع کنید؛ ارسال در پس‌زمینه ادامه پیدا می‌کند.\n۳) در «تنظیمات» سقف روزانه، رمز برنامه، حالت تیره و پشتیبان‌گیری را تنظیم کنید.\n\nفقط برای مخاطبانی پیام بفرستید که رضایت دارند.")
-            .setPositiveButton("متوجه شدم", null).show()
+            .setPositiveButton("متوجه شدم") { _, _ -> askPermsWithRationale() }
+            .setOnCancelListener { askPermsWithRationale() }
+            .show()
     }
 
     // ---------- app lock ----------
@@ -574,6 +573,7 @@ class MainActivity : AppCompatActivity() {
     private fun unlockNow() {
         sessionUnlocked = true
         buildUi()
+        askPermsWithRationale()
     }
 
     private fun showLock() {
@@ -1512,6 +1512,43 @@ class MainActivity : AppCompatActivity() {
         val l = mutableListOf(android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_PHONE_STATE, android.Manifest.permission.RECEIVE_SMS)
         if (android.os.Build.VERSION.SDK_INT >= 33) l.add("android.permission.POST_NOTIFICATIONS")
         return l.toTypedArray()
+    }
+
+    private var permFlow = false
+
+    private fun askPermsWithRationale() {
+        if (!sessionUnlocked) return
+        if (hasSmsPerm() && hasPhonePerm() && hasRecvPerm()) return
+        val sp = getSharedPreferences("settings", Context.MODE_PRIVATE)
+        if (sp.getInt("perm_skips", 0) >= 2) return
+        AlertDialog.Builder(this).setTitle("چرا به مجوزها نیاز داریم؟")
+            .setMessage("برای کار کردن برنامه، چند مجوز لازم است:\n\n• پیامک (ارسال): فقط برای ارسال پیامی که خودتان تعیین و تأیید می‌کنید.\n• پیامک (دریافت): فقط برای تشخیص پاسخ «لغو» از مخاطبین. پیامک‌های شخصی شما ذخیره یا ارسال نمی‌شود.\n• وضعیت تلفن: فقط برای نمایش و انتخاب سیم‌کارت.\n• اعلان: برای نمایش پیشرفت ارسال در پس‌زمینه.\n\nاطلاعات شما فقط روی گوشی می‌ماند. در مرحله بعد، اندروید برای هر مجوز از شما اجازه می‌گیرد.")
+            .setPositiveButton("ادامه") { _, _ ->
+                permFlow = true
+                permLauncher.launch(allPerms())
+            }
+            .setNegativeButton("بعداً") { _, _ ->
+                sp.edit().putInt("perm_skips", sp.getInt("perm_skips", 0) + 1).apply()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun onPermResult(res: Map<String, Boolean>) {
+        if (!permFlow) return
+        permFlow = false
+        if (hasSmsPerm() && hasPhonePerm() && hasRecvPerm()) return
+        AlertDialog.Builder(this).setTitle("مجوزها کامل داده نشد")
+            .setMessage("بدون مجوز پیامک، ارسال و تشخیص «لغو» کار نمی‌کند. می‌توانید از تنظیمات گوشی فعالشان کنید:\n\nتنظیمات ← برنامه‌ها ← این برنامه ← مجوزها ← پیامک و تلفن\n\nاگر برنامه را از فایل APK نصب کرده‌اید و گزینه‌ها خاکستری است (اندروید ۱۳ به بالا): در همان صفحه‌ی اطلاعات برنامه، سه‌نقطه‌ی بالا را بزنید و «Allow restricted settings» را بزنید، بعد مجوزها را فعال کنید.")
+            .setPositiveButton("باز کردن تنظیمات") { _, _ ->
+                try {
+                    startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:" + packageName)))
+                } catch (e: Exception) {
+                    toast("تنظیمات باز نشد؛ دستی از تنظیمات گوشی اقدام کنید.")
+                }
+            }
+            .setNegativeButton("بعداً", null)
+            .show()
     }
 
     private var pollJob: kotlinx.coroutines.Job? = null
